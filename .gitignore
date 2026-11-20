@@ -1,0 +1,15 @@
+node_modules/
+build/
+dist/
+coverage/
+tests/temp_browser_profile/
+.claude/
+.agents/
+skills-lock.json
+.vscode/
+.DS_Store
+*.log
+*.bak
+*.tmp
+.env*
+!.env.example

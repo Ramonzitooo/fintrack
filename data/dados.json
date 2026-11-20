@@ -1,0 +1,31 @@
+{
+  "version": "1.0.0",
+  "lastUpdated": null,
+  "config": {
+    "salarioBruto": 0,
+    "pctAdiantamento": 0.40,
+    "outrasReceitas": 0,
+    "pctRetidoAuto": 0.05,
+    "pctAporteManual": 0.10,
+    "pctAporteOportunidade": 0.05,
+    "despesaEssencial": 0,
+    "mesesReserva": 6,
+    "tema": "auto"
+  },
+  "receitas": [],
+  "despesas": [],
+  "cofrinhos": [],
+  "orcamento": [
+    { "categoria": "Moradia", "limite": 0 },
+    { "categoria": "Alimentação", "limite": 0 },
+    { "categoria": "Transporte", "limite": 0 },
+    { "categoria": "Saúde", "limite": 0 },
+    { "categoria": "Educação", "limite": 0 },
+    { "categoria": "Lazer", "limite": 0 },
+    { "categoria": "Vestuário", "limite": 0 },
+    { "categoria": "Contas e Serviços", "limite": 0 },
+    { "categoria": "Cartão de Crédito", "limite": 0 },
+    { "categoria": "Outros", "limite": 0 }
+  ],
+  "metas": []
+}

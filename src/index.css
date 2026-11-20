@@ -1,0 +1,149 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+
+@layer base {
+  :root {
+    color-scheme: light;
+    --font-display: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+  }
+
+  .dark, [data-theme="dark"] {
+    color-scheme: dark;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    line-height: 1.5;
+    font-optical-sizing: auto;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: clip;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    transition: background-color 220ms ease, color 220ms ease;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+    text-wrap: balance;
+  }
+
+  .font-mono, .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums lining-nums;
+    font-feature-settings: "tnum" 1, "lnum" 1;
+  }
+
+  button, a, input, select {
+    touch-action: manipulation;
+  }
+}
+
+/* Apple WWDC §1: Instant response on pointer-down (kill latency) */
+button:not(:disabled):active {
+  transform: scale(0.97);
+  transition: transform 90ms ease-out;
+}
+
+/* Apple WWDC §12: Translucent chrome & specular material edges */
+.apple-glass-header {
+  background: rgba(255, 255, 255, 0.78);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.dark .apple-glass-header,
+[data-theme="dark"] .apple-glass-header {
+  background: rgba(15, 23, 42, 0.76);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.apple-glass-sheet {
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(24px) saturate(190%);
+  -webkit-backdrop-filter: blur(24px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 24px 48px -12px rgba(15, 23, 42, 0.22), 0 0 0 1px rgba(15, 23, 42, 0.06);
+}
+
+.dark .apple-glass-sheet,
+[data-theme="dark"] .apple-glass-sheet {
+  background: rgba(15, 23, 42, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 24px 48px -12px rgba(0, 0, 0, 0.6), 0 1px 0 0 rgba(255, 255, 255, 0.14) inset;
+}
+
+/* Privacy Mode Blur */
+body.privacy-mode .privacy-val {
+  filter: blur(7px);
+  user-select: none;
+  transition: filter 150ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body.privacy-mode .privacy-val:hover,
+body.privacy-mode .privacy-val:focus,
+body.privacy-mode .privacy-val:focus-within {
+  filter: blur(0);
+}
+
+/* High-contrast keyboard focus ring (WCAG 2.2 AA/AAA) */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2.5px solid #059669;
+  outline-offset: 2px;
+}
+
+/* Apple WWDC §14: Reduced motion, reduced transparency & high contrast */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 120ms !important;
+    scroll-behavior: auto !important;
+  }
+  button:not(:disabled):active {
+    transform: none !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .apple-glass-header {
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .dark .apple-glass-header,
+  [data-theme="dark"] .apple-glass-header {
+    background: #0f172a !important;
+  }
+  .apple-glass-sheet {
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .dark .apple-glass-sheet,
+  [data-theme="dark"] .apple-glass-sheet {
+    background: #0f172a !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .apple-glass-header,
+  .apple-glass-sheet {
+    border-width: 2px !important;
+  }
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  select:focus-visible {
+    outline-width: 3px !important;
+  }
+}
