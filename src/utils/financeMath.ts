@@ -52,6 +52,19 @@ export interface ExpenseItem {
   contaOrigem: string | null;
   contaOrigemId?: string | null;
   formaPagamento?: string;
+  parcelaAtual?: number;
+  totalParcelas?: number;
+  grupoParcelamentoId?: string;
+}
+
+export interface ExtraIncomeItem {
+  id: string;
+  descricao: string;
+  valor: number;
+  categoria: string;
+  data: string;
+  recebida: boolean;
+  contaDestinoId?: string | null;
 }
 
 export interface RecurringExpenseTemplate {
@@ -200,7 +213,7 @@ export function calculateGoalMonthsCompound(
       monthsLinear: Infinity,
       monthsCompound: nOnlyInterest,
       monthsSavedByInterest: 0,
-      totalInterestEarned: Math.max(0, fv - pv),
+      totalInterestEarned: Math.max(0, Math.round((fv - pv) * 100) / 100),
     };
   }
 
@@ -212,14 +225,14 @@ export function calculateGoalMonthsCompound(
     ? Math.max(0, monthsLinear - monthsCompound)
     : 0;
 
-  // Simula evolução mês a mês para achar o total exato de juros ganhos até atingir a meta
-  let simBalance = pv;
-  let totalContributed = 0;
-  for (let m = 0; m < monthsCompound; m++) {
-    simBalance = simBalance * (1 + r) + pmt;
-    totalContributed += pmt;
-  }
-  const totalInterestEarned = Math.max(0, Math.round((simBalance - pv - totalContributed) * 100) / 100);
+  // Fórmula fechada O(1) para saldo futuro após monthsCompound meses
+  const factor = Math.pow(1 + r, monthsCompound);
+  const simBalance = pv * factor + pmt * ((factor - 1) / r);
+  const totalContributed = pmt * monthsCompound;
+  const rawInterest = Number.isFinite(simBalance)
+    ? simBalance - pv - totalContributed
+    : fv - pv - totalContributed;
+  const totalInterestEarned = Math.max(0, Math.round(rawInterest * 100) / 100);
 
   return {
     monthsLinear,
@@ -303,7 +316,7 @@ export function calculateFireProjection(
   };
 
   const monthsToFire = calcMonths(pmt);
-  const monthsWithExtra = calcMonths(pmt + 200);
+  const monthsWithExtra = calcMonths(pmt + 100);
 
   if (!Number.isFinite(monthsToFire)) {
     return {
@@ -430,6 +443,25 @@ export function refundExpensePaymentToAccount(currentBalance: number, expenseAmo
 }
 
 /**
+ * Fixa um dia do mês dentro dos limites válidos do mês/ano informados (ex.: 31/02 -> 28/02 ou 29/02),
+ * evitando overflow automático do construtor Date para o mês seguinte.
+ */
+export function clampDateToMonth(year: number, monthZeroBased: number, day: number): Date {
+  const normalized = new Date(year, monthZeroBased, 1);
+  const y = normalized.getFullYear();
+  const m = normalized.getMonth();
+  const lastDayOfMonth = new Date(y, m + 1, 0).getDate();
+  const clampedDay = Math.max(1, Math.min(Math.round(Number(day) || 1), lastDayOfMonth));
+  return new Date(y, m, clampedDay);
+}
+
+function diffDaysUTC(from: Date, to: Date): number {
+  const utcFrom = Date.UTC(from.getFullYear(), from.getMonth(), from.getDate());
+  const utcTo = Date.UTC(to.getFullYear(), to.getMonth(), to.getDate());
+  return Math.round((utcTo - utcFrom) / (1000 * 60 * 60 * 24));
+}
+
+/**
  * Calcula o prazo real em dias para pagar uma compra feita hoje no cartão de crédito.
  * Se hoje >= diaCorte, a compra entra na fatura que fecha no próximo mês.
  * Se hoje < diaCorte, a compra entra na fatura que fecha neste mês.
@@ -448,23 +480,22 @@ export function calculateCreditCardGraceDays(
   let statementCloseDate: Date;
   if (currentDay >= closingDay) {
     // Fatura deste mês já fechou -> compra cai no fechamento do mês seguinte
-    statementCloseDate = new Date(year, month + 1, closingDay);
+    statementCloseDate = clampDateToMonth(year, month + 1, closingDay);
   } else {
     // Fatura deste mês ainda está aberta -> fecha neste mês
-    statementCloseDate = new Date(year, month, closingDay);
+    statementCloseDate = clampDateToMonth(year, month, closingDay);
   }
 
   // Determina a data de vencimento associada a esse fechamento
   let statementDueDate: Date;
   if (dueDay > closingDay) {
-    statementDueDate = new Date(statementCloseDate.getFullYear(), statementCloseDate.getMonth(), dueDay);
+    statementDueDate = clampDateToMonth(statementCloseDate.getFullYear(), statementCloseDate.getMonth(), dueDay);
   } else {
     // Vence no mês subsequente ao fechamento (ex: fecha dia 25, vence dia 05)
-    statementDueDate = new Date(statementCloseDate.getFullYear(), statementCloseDate.getMonth() + 1, dueDay);
+    statementDueDate = clampDateToMonth(statementCloseDate.getFullYear(), statementCloseDate.getMonth() + 1, dueDay);
   }
 
-  const diffMs = statementDueDate.getTime() - today.getTime();
-  const daysToPay = Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)));
+  const daysToPay = Math.max(1, diffDaysUTC(today, statementDueDate));
 
   let statusLabel: 'Melhor Janela' | 'Prazo Médio' | 'Fatura Quase Fechando' = 'Prazo Médio';
   if (daysToPay >= 32) {
@@ -515,7 +546,7 @@ export function simulateCashVsInstallments(
   let totalInterestEarned = 0;
 
   for (let m = 1; m <= n; m++) {
-    const yieldMonth = saldoCDI * r;
+    const yieldMonth = saldoCDI > 0 ? saldoCDI * r : 0;
     totalInterestEarned += yieldMonth;
     saldoCDI = saldoCDI + yieldMonth - price / n;
   }
@@ -552,17 +583,17 @@ export function calculateOfficialPayrollTaxes(
   effectiveTaxRatePct: number;
   estimatedNetSalary: number;
 } {
-  const bruto = Math.max(0, Number(grossSalary) || 0);
-  if (bruto <= 0) {
+  if (!Number.isFinite(grossSalary) || grossSalary <= 0) {
     return { inss: 0, irrf: 0, effectiveTaxRatePct: 0, estimatedNetSalary: 0 };
   }
+  const bruto = grossSalary;
 
-  // Faixas progressivas do INSS (referência atualizada CLT)
+  // Faixas progressivas do INSS 2026 (Portaria Interministerial MPS/MF nº 13/2026)
   const bracketsINSS = [
-    { limit: 1518.0, rate: 0.075 },
-    { limit: 2793.88, rate: 0.09 },
-    { limit: 4190.83, rate: 0.12 },
-    { limit: 8157.41, rate: 0.14 },
+    { limit: 1621.0, rate: 0.075 },
+    { limit: 2902.84, rate: 0.09 },
+    { limit: 4354.27, rate: 0.12 },
+    { limit: 8475.55, rate: 0.14 },
   ];
 
   let inss = 0;
@@ -579,24 +610,34 @@ export function calculateOfficialPayrollTaxes(
   inss = Math.round(inss * 100) / 100;
 
   // Base de cálculo do IRRF: opta pelo maior benefício entre Dedução Legal (INSS + Dependentes) ou Desconto Simplificado Mensal (R$ 607,20)
-  const legalDeduction = inss + Math.max(0, dependents) * 189.59;
+  const safeDependents = Math.max(0, Number(dependents) || 0);
+  const legalDeduction = inss + safeDependents * 189.59;
   const simplifiedDiscount = 607.2;
   const bestDeduction = Math.max(legalDeduction, simplifiedDiscount);
   const baseIR = Math.max(0, bruto - bestDeduction);
 
-  let irrf = 0;
+  let irrfBase = 0;
   if (baseIR <= 2428.8) {
-    irrf = 0;
+    irrfBase = 0;
   } else if (baseIR <= 2826.65) {
-    irrf = baseIR * 0.075 - 182.16;
+    irrfBase = baseIR * 0.075 - 182.16;
   } else if (baseIR <= 3751.05) {
-    irrf = baseIR * 0.15 - 394.16;
+    irrfBase = baseIR * 0.15 - 394.16;
   } else if (baseIR <= 4664.68) {
-    irrf = baseIR * 0.225 - 675.49;
+    irrfBase = baseIR * 0.225 - 675.49;
   } else {
-    irrf = baseIR * 0.275 - 908.73;
+    irrfBase = baseIR * 0.275 - 908.73;
   }
-  irrf = Math.max(0, Math.round(irrf * 100) / 100);
+  irrfBase = Math.max(0, Math.round(irrfBase * 100) / 100);
+
+  // Redutor Mensal da Lei nº 15.270/2025 sobre os rendimentos tributáveis
+  let reducao = 0;
+  if (bruto <= 5000.0) {
+    reducao = 312.89;
+  } else if (bruto <= 7350.0) {
+    reducao = Math.max(0, 978.62 - 0.133145 * bruto);
+  }
+  const irrf = Math.max(0, Math.round((irrfBase - reducao) * 100) / 100);
 
   const totalTaxes = inss + irrf;
   const effectiveTaxRatePct = Math.round(((totalTaxes / bruto) * 100) * 10) / 10;
@@ -619,6 +660,8 @@ const QUICK_EXPENSE_CATEGORY_RULES: Array<{ pattern: RegExp; category: ExpenseIt
   { pattern: /farmacia|farmácia|remedio|remédio|medico|médico|dentista|exame|consulta/i, category: 'Saúde' },
   { pattern: /cinema|show|jogo|viagem|passeio|bar|lazer/i, category: 'Lazer' },
   { pattern: /netflix|spotify|assinatura|prime|youtube/i, category: 'Assinaturas' },
+  { pattern: /curso|faculdade|escola|livro|livros|mensalidade|educacao|educação|aula|udemy|alura/i, category: 'Educação' },
+  { pattern: /imprevisto|emergencia|emergência|multa|conserto|reparo|guincho|chaveiro/i, category: 'Imprevisto' },
 ];
 
 function classifyQuickExpenseCategory(description: string): ExpenseItem['categoria'] {
@@ -634,6 +677,16 @@ function classifyQuickPaymentMethod(text: string): string {
   return 'Pix / Débito';
 }
 
+function parseMonetaryToken(rawNum: string): number {
+  if (rawNum.includes(',')) {
+    return parseFloat(rawNum.replace(/\./g, '').replace(',', '.'));
+  }
+  if (/^\d{1,3}(?:\.\d{3})+$/.test(rawNum)) {
+    return parseFloat(rawNum.replace(/\./g, ''));
+  }
+  return parseFloat(rawNum);
+}
+
 /**
  * Parser de linguagem natural para lançamento rápido de despesas (Command Palette Ctrl+K).
  */
@@ -644,13 +697,43 @@ export function parseQuickExpenseCommand(text: string): {
   formaPagamento: string;
 } | null {
   if (!text || typeof text !== 'string') return null;
-  const valMatch = text.trim().match(/(?:r\$\s*)?(\d+(?:[.,]\d{1,2})?)/i);
-  if (!valMatch) return null;
+  const trimmed = text.trim();
+  const monetaryRegex = /(?:r\$\s*)?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)/gi;
 
-  const valor = parseFloat(valMatch[1].replace(',', '.'));
-  if (!Number.isFinite(valor) || valor <= 0) return null;
+  const candidates: Array<{
+    fullMatch: string;
+    index: number;
+    valor: number;
+    hasDecimalOrCurrency: boolean;
+  }> = [];
 
-  const withoutVal = text.replace(valMatch[0], '').replace(/\s+/g, ' ').trim();
+  for (const match of trimmed.matchAll(monetaryRegex)) {
+    const rawNum = match[1];
+    const valor = parseMonetaryToken(rawNum);
+    if (Number.isFinite(valor) && valor > 0 && match.index !== undefined) {
+      candidates.push({
+        fullMatch: match[0],
+        index: match.index,
+        valor,
+        hasDecimalOrCurrency: /[.,]|r\$/i.test(match[0]),
+      });
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  const decimalCandidates = candidates.filter((c) => c.hasDecimalOrCurrency);
+  const chosen =
+    decimalCandidates.length > 0
+      ? decimalCandidates[decimalCandidates.length - 1]
+      : candidates[candidates.length - 1];
+
+  const withoutVal = (
+    trimmed.slice(0, chosen.index) + trimmed.slice(chosen.index + chosen.fullMatch.length)
+  )
+    .replace(/\s+/g, ' ')
+    .trim();
+
   const descClean = withoutVal
     .replace(/\b(pix|cartao|cartão|credito|crédito|debito|débito|dinheiro|no|na|via|em)\b/gi, '')
     .replace(/\s+/g, ' ')
@@ -660,7 +743,7 @@ export function parseQuickExpenseCommand(text: string): {
 
   return {
     descricao: descClean.charAt(0).toUpperCase() + descClean.slice(1),
-    valor: Math.round(valor * 100) / 100,
+    valor: Math.round(chosen.valor * 100) / 100,
     categoria: classifyQuickExpenseCategory(descClean),
     formaPagamento: classifyQuickPaymentMethod(withoutVal),
   };
@@ -674,13 +757,36 @@ export interface PaydayConfig {
 
 const FERIADOS_NACIONAIS = new Set(['0-1', '3-21', '4-1', '8-7', '9-12', '10-2', '10-15', '10-20', '11-25']);
 
+function calculateEasterSunday(year: number): Date {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31) - 1;
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month, day);
+}
+
 export function calcularQuintoDiaUtil(ano: number, mes: number): Date {
+  const easter = calculateEasterSunday(ano);
+  const goodFriday = new Date(easter.getFullYear(), easter.getMonth(), easter.getDate() - 2);
+  const goodFridayKey = `${goodFriday.getMonth()}-${goodFriday.getDate()}`;
+
   let uteis = 0;
   for (let dia = 1; dia <= 31; dia++) {
     const d = new Date(ano, mes, dia);
     if (d.getMonth() !== mes) break;
     const sem = d.getDay();
-    if (sem !== 0 && sem !== 6 && !FERIADOS_NACIONAIS.has(`${mes}-${dia}`)) {
+    const key = `${mes}-${dia}`;
+    if (sem !== 0 && sem !== 6 && !FERIADOS_NACIONAIS.has(key) && key !== goodFridayKey) {
       uteis++;
       if (uteis === 5) return d;
     }
@@ -703,8 +809,8 @@ export function getNextPaydayInfo(
 
   if (!target && cfg.tipo === 'diaFixo') {
     const dia = cfg.diaFixo || 5;
-    const thisMonth = new Date(today.getFullYear(), today.getMonth(), dia);
-    target = thisMonth > today ? thisMonth : new Date(today.getFullYear(), today.getMonth() + 1, dia);
+    const thisMonth = clampDateToMonth(today.getFullYear(), today.getMonth(), dia);
+    target = thisMonth > today ? thisMonth : clampDateToMonth(today.getFullYear(), today.getMonth() + 1, dia);
   }
 
   if (!target) {
@@ -718,14 +824,31 @@ export function getNextPaydayInfo(
     }
   }
 
-  const diffMs = target.getTime() - today.getTime();
-  const daysRemaining = Math.max(1, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+  const daysRemaining = Math.max(1, diffDaysUTC(today, target));
   const formattedDate = `${String(target.getDate()).padStart(2, '0')}/${String(target.getMonth() + 1).padStart(
     2,
     '0'
   )}/${target.getFullYear()}`;
 
   return { daysRemaining, formattedDate };
+}
+
+/**
+ * Calcula a Diária Segura até o próximo pagamento em centavos exatos.
+ */
+export function calculateSafeDailyAllowance(params: {
+  salarioLiquido: number;
+  sobraPrevistaMes: number;
+  saldoLivre: number;
+  daysRemaining: number;
+}): number {
+  const salarioCents = Math.max(0, toCents(params.salarioLiquido));
+  const sobraCents = Math.max(0, toCents(params.sobraPrevistaMes));
+  const saldoLivreCents = Math.max(0, toCents(params.saldoLivre));
+  const days = Math.max(1, Math.round(Number(params.daysRemaining) || 1));
+
+  const baseCents = salarioCents > 0 ? Math.min(sobraCents, saldoLivreCents) : saldoLivreCents;
+  return fromCents(Math.floor(baseCents / days));
 }
 
 export function matchesExpenseOriginBank(bank: BankAccount, expense: ExpenseItem): boolean {
@@ -742,8 +865,11 @@ export function executeGoalTransfer(
   mode: 'aporte' | 'withdraw'
 ): { bancos: BankAccount[]; caixinhas: Caixinha[]; effectiveValor: number } {
   const targetCx = caixinhas.find((c) => c.id === caixinhaId);
+  if (!Number.isFinite(valor) || valor <= 0) {
+    return { bancos, caixinhas, effectiveValor: 0 };
+  }
   const rawVal = fromCents(Math.max(0, toCents(valor)));
-  if (!targetCx || rawVal <= 0) {
+  if (!targetCx || !bankId || !bancos.some((b) => b.id === bankId) || !Number.isFinite(rawVal) || rawVal <= 0) {
     return { bancos, caixinhas, effectiveValor: 0 };
   }
 
@@ -787,6 +913,9 @@ export function receiveSalary(
   bankId: string,
   autoAportarCaixinhas: boolean
 ): { bancos: BankAccount[]; caixinhas: Caixinha[] } {
+  if (!Number.isFinite(netSalary) || netSalary <= 0 || !bankId || !bancos.some((b) => b.id === bankId)) {
+    return { bancos, caixinhas };
+  }
   const liq = fromCents(Math.max(0, toCents(netSalary)));
   if (liq <= 0) return { bancos, caixinhas };
 
@@ -839,6 +968,16 @@ export function payExpenseInList(
   return { bancos: nextBancos, despesas: nextDespesas, target };
 }
 
+function updateExpenseOriginBank(
+  bancos: BankAccount[],
+  expense: ExpenseItem,
+  updater: (bank: BankAccount) => BankAccount
+): BankAccount[] {
+  const idx = bancos.findIndex((b) => matchesExpenseOriginBank(b, expense));
+  if (idx === -1) return bancos;
+  return bancos.map((b, i) => (i === idx ? updater(b) : b));
+}
+
 export function refundExpenseInList(
   bancos: BankAccount[],
   despesas: ExpenseItem[],
@@ -847,9 +986,10 @@ export function refundExpenseInList(
   const target = despesas.find((d) => d.id === expenseId) || null;
   if (!target || !target.paga) return { bancos, despesas, target: null };
 
-  const nextBancos = bancos.map((b) =>
-    matchesExpenseOriginBank(b, target) ? { ...b, saldo: refundExpensePaymentToAccount(b.saldo, target.valor) } : b
-  );
+  const nextBancos = updateExpenseOriginBank(bancos, target, (b) => ({
+    ...b,
+    saldo: refundExpensePaymentToAccount(b.saldo, target.valor),
+  }));
 
   const nextDespesas = despesas.map((d) =>
     d.id === expenseId
@@ -873,9 +1013,10 @@ export function editExpenseAmountInList(
   const diff = subMoney(novoVal, target.valor);
   const nextBancos =
     target.paga && diff !== 0
-      ? bancos.map((b) =>
-          matchesExpenseOriginBank(b, target) ? { ...b, saldo: subMoney(b.saldo, diff) } : b
-        )
+      ? updateExpenseOriginBank(bancos, target, (b) => ({
+          ...b,
+          saldo: subMoney(b.saldo, diff),
+        }))
       : bancos;
 
   const nextDespesas = despesas.map((d) => (d.id === expenseId ? { ...d, valor: novoVal } : d));
@@ -891,9 +1032,10 @@ export function deleteExpenseFromList(
   if (!target) return { bancos, despesas, target: null };
 
   const nextBancos = target.paga
-    ? bancos.map((b) =>
-        matchesExpenseOriginBank(b, target) ? { ...b, saldo: refundExpensePaymentToAccount(b.saldo, target.valor) } : b
-      )
+    ? updateExpenseOriginBank(bancos, target, (b) => ({
+        ...b,
+        saldo: refundExpensePaymentToAccount(b.saldo, target.valor),
+      }))
     : bancos;
 
   const nextDespesas = despesas.filter((d) => d.id !== expenseId);
@@ -966,5 +1108,199 @@ export function shouldDismissSheetOnRelease(
   if (velocityY < -80) return false;
   const projectedEndpoint = dragOffsetY + projectMomentum(velocityY, 0.99);
   return projectedEndpoint >= thresholdPx;
+}
+
+/**
+ * Soma em centavos exatos as receitas avulsas de uma competência.
+ * Quando `onlyReceived` é true, considera apenas as receitas já marcadas como recebidas.
+ */
+export function sumMonthlyExtraIncome(
+  receitas: ExtraIncomeItem[] | undefined,
+  onlyReceived = false
+): number {
+  if (!Array.isArray(receitas) || receitas.length === 0) return 0;
+  const values: number[] = [];
+  for (const r of receitas) {
+    if (!r || (onlyReceived && !r.recebida)) continue;
+    const val = Number(r.valor);
+    if (Number.isFinite(val) && val > 0) {
+      values.push(val);
+    }
+  }
+  return sumMoney(values);
+}
+
+/**
+ * Gera despesas parceladas multi-mês com divisão exata em centavos.
+ * Qualquer resto da divisão inteira é alocado na 1ª parcela para garantir
+ * que a soma das parcelas seja exatamente igual a `valorTotal`.
+ */
+export function generateInstallmentExpenses(params: {
+  baseId: string;
+  descricao: string;
+  valorTotal: number;
+  totalParcelas: number;
+  competenciaInicial: string;
+  categoria: string;
+  vencimentoDia: number;
+  natureza?: 'essencial' | 'estilo_vida';
+  contaOrigemId?: string | null;
+  contaOrigem?: string;
+}): Record<string, ExpenseItem[]> {
+  const totalCents = toCents(params.valorTotal);
+  const n = Math.trunc(Number(params.totalParcelas));
+  if (totalCents <= 0 || !Number.isFinite(n) || n < 1) {
+    return {};
+  }
+
+  const compMatch = /^(\d{4})-(\d{2})$/.exec(params.competenciaInicial);
+  if (!compMatch) return {};
+  const startYear = parseInt(compMatch[1], 10);
+  const startMonth = parseInt(compMatch[2], 10);
+  if (startMonth < 1 || startMonth > 12) return {};
+
+  const baseCents = Math.floor(totalCents / n);
+  const remainderCents = totalCents - baseCents * n;
+  const diaVencimento = Math.max(1, Math.min(31, Math.trunc(Number(params.vencimentoDia) || 10)));
+
+  const result: Record<string, ExpenseItem[]> = {};
+  for (let i = 0; i < n; i++) {
+    const parcelaAtual = i + 1;
+    const totalMonths = startYear * 12 + (startMonth - 1) + i;
+    const year = Math.floor(totalMonths / 12);
+    const month = (totalMonths % 12) + 1;
+    const compKey = `${year}-${String(month).padStart(2, '0')}`;
+    const parcelaCents = i === 0 ? baseCents + remainderCents : baseCents;
+
+    const item: ExpenseItem = {
+      id: `${params.baseId}_p${parcelaAtual}`,
+      moldeId: null,
+      descricao: `${params.descricao} (${parcelaAtual}/${n})`,
+      valor: fromCents(parcelaCents),
+      diaVencimento,
+      paga: false,
+      categoria: params.categoria as ExpenseItem['categoria'],
+      ...(params.natureza ? { natureza: params.natureza } : {}),
+      dataPagamento: null,
+      contaOrigem: params.contaOrigem ?? null,
+      contaOrigemId: params.contaOrigemId ?? null,
+      parcelaAtual,
+      totalParcelas: n,
+      grupoParcelamentoId: params.baseId,
+    };
+
+    if (!result[compKey]) {
+      result[compKey] = [];
+    }
+    result[compKey].push(item);
+  }
+
+  return result;
+}
+
+/**
+ * Simula a quitação de dívidas mês a mês com juros compostos mensais,
+ * comparando estratégias Avalanche (maior taxa primeiro) e Bola de Neve (menor saldo primeiro).
+ * Aplica efeito bola de neve: parcelas mínimas liberadas de dívidas quitadas somam-se ao aporte extra.
+ */
+export function simulateDebtPayoff(
+  debts: DebtItem[],
+  extraMonthlyPayment: number,
+  strategy: 'avalanche' | 'snowball'
+): { months: number; totalInterestPaid: number; totalPaid: number; order: string[] } {
+  const MAX_MONTHS = 600;
+  const activeDebts = (debts || [])
+    .map((d) => {
+      const balanceCents = Math.max(0, toCents(d.saldoDevedor));
+      const monthlyRate = Math.max(0, Number.isFinite(d.taxaJurosMensal) ? d.taxaJurosMensal : 0) / 100;
+      const rawMinCents = toCents(d.parcelaMinima);
+      const minPaymentCents =
+        rawMinCents > 0
+          ? rawMinCents
+          : Math.max(100, Math.round(balanceCents * (monthlyRate + 0.02)));
+      return {
+        id: d.id,
+        balanceCents,
+        monthlyRate,
+        minPaymentCents,
+        paidOff: false,
+      };
+    })
+    .filter((d) => d.balanceCents > 0);
+
+  if (activeDebts.length === 0) {
+    return { months: 0, totalInterestPaid: 0, totalPaid: 0, order: [] };
+  }
+
+  const extraCents = Math.max(0, toCents(extraMonthlyPayment));
+  const totalBudgetCents =
+    activeDebts.reduce((acc, d) => acc + d.minPaymentCents, 0) + extraCents;
+
+  let months = 0;
+  let totalInterestCents = 0;
+  let totalPaidCents = 0;
+  const order: string[] = [];
+
+  for (let m = 1; m <= MAX_MONTHS; m++) {
+    const remaining = activeDebts.filter((d) => d.balanceCents > 0);
+    if (remaining.length === 0) break;
+
+    months = m;
+
+    // 1. Aplica juros compostos mensais sobre os saldos devedores ativos
+    for (const d of remaining) {
+      const interestCents = Math.round(d.balanceCents * d.monthlyRate);
+      d.balanceCents += interestCents;
+      totalInterestCents += interestCents;
+    }
+
+    // 2. Ordena dívidas ativas conforme estratégia escolhida
+    const sorted = [...remaining].sort((a, b) => {
+      if (strategy === 'avalanche') {
+        return b.monthlyRate - a.monthlyRate || a.balanceCents - b.balanceCents;
+      }
+      return a.balanceCents - b.balanceCents || b.monthlyRate - a.monthlyRate;
+    });
+
+    let availableBudget = totalBudgetCents;
+
+    // 3. Paga a parcela mínima de cada dívida ativa
+    for (const d of sorted) {
+      if (availableBudget <= 0) break;
+      const pay = Math.min(d.balanceCents, d.minPaymentCents, availableBudget);
+      d.balanceCents -= pay;
+      totalPaidCents += pay;
+      availableBudget -= pay;
+      if (d.balanceCents === 0 && !d.paidOff) {
+        d.paidOff = true;
+        order.push(d.id);
+      }
+    }
+
+    // 4. Direciona o excedente (aporte extra + bola de neve de dívidas já quitadas) para a prioritária
+    for (const d of sorted) {
+      if (availableBudget <= 0) break;
+      if (d.balanceCents <= 0) continue;
+      const pay = Math.min(d.balanceCents, availableBudget);
+      d.balanceCents -= pay;
+      totalPaidCents += pay;
+      availableBudget -= pay;
+      if (d.balanceCents === 0 && !d.paidOff) {
+        d.paidOff = true;
+        order.push(d.id);
+      }
+    }
+
+    if (activeDebts.every((d) => d.balanceCents === 0)) {
+      break;
+    }
+  }
+
+  return {
+    months,
+    totalInterestPaid: fromCents(totalInterestCents),
+    totalPaid: fromCents(totalPaidCents),
+    order,
+  };
 }
 

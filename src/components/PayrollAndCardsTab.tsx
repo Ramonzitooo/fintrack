@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { AppState, fmtBRL } from '../utils/storage';
 import {
+  CreditCard,
   annualToMonthlyRate,
-  calculateBudget503020,
   calculateCreditCardGraceDays,
   calculateOfficialPayrollTaxes,
   simulateCashVsInstallments,
@@ -11,12 +11,9 @@ import {
   Plus,
   Trash2,
   Calculator,
-  Clock,
   Save,
   Wallet,
-  CreditCard as CardIcon,
-  CheckCircle2,
-  RotateCcw,
+  Pencil,
 } from 'lucide-react';
 
 interface PayrollTabProps {
@@ -61,19 +58,26 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
   const officialTaxes = calculateOfficialPayrollTaxes(bruto, dependents);
 
   // Calculadora Anti-Impulso
+  const horasPorDiaMap: Record<number, number> = { 150: 6, 180: 6, 200: 8, 220: 8 };
+  const horasPorDia = horasPorDiaMap[antiImpulsoJornada] || 8;
   const valorHora = liquido > 0 ? liquido / antiImpulsoJornada : 0;
   const totalHorasItem = valorHora > 0 ? antiImpulsoPreco / valorHora : 0;
-  const diasTrab = Math.floor(totalHorasItem / 8);
-  const horasRest = Math.floor(totalHorasItem % 8);
-  const minRest = Math.round((totalHorasItem % 1) * 60);
+  const totalMinutes = Math.round(totalHorasItem * 60);
+  const totalHoursRounded = Math.floor(totalMinutes / 60);
+  const minRest = totalMinutes % 60;
+  const diasTrab = Math.floor(totalHoursRounded / horasPorDia);
+  const horasRest = totalHoursRounded % horasPorDia;
 
-  // Histórico filtrado
+  // Histórico ordenado cronologicamente por competência descendente e filtrado
+  const sortedHistory = [...state.historicoContracheques].sort((a, b) =>
+    (b.competencia || '').localeCompare(a.competencia || '')
+  );
   const histList =
     historyFilter === '6'
-      ? state.historicoContracheques.slice(0, 6)
+      ? sortedHistory.slice(0, 6)
       : historyFilter === '12'
-      ? state.historicoContracheques.slice(0, 12)
-      : state.historicoContracheques;
+      ? sortedHistory.slice(0, 12)
+      : sortedHistory;
 
   const totalLiquidoPeriodo = histList.reduce((s, h) => s + (h.liquido || 0), 0);
   const totalDescontosPeriodo = histList.reduce((s, h) => s + (h.descontosTotal || 0), 0);
@@ -131,15 +135,16 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
             </p>
           </div>
           <div className="flex items-center gap-3 shrink-0 flex-wrap">
-            <label className="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-1.5">
+            <label htmlFor="payroll-dependents" className="text-xs text-slate-600 dark:text-slate-400 flex items-center gap-1.5">
               <span>Dependentes:</span>
               <input
+                id="payroll-dependents"
                 type="number"
                 min={0}
                 max={10}
                 value={dependents}
                 onChange={(e) => setDependents(Math.max(0, parseInt(e.target.value, 10) || 0))}
-                className="w-12 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1 font-mono text-center text-xs"
+                className="w-12 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded px-2 py-1 font-mono tabular-nums text-center text-xs"
               />
             </label>
             <button
@@ -316,22 +321,24 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
-            <label className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+            <label htmlFor="anti-impulso-preco" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
               Preço do Produto / Desejo (R$)
             </label>
             <input
+              id="anti-impulso-preco"
               type="number"
               step="10"
               value={antiImpulsoPreco}
               onChange={(e) => setAntiImpulsoPreco(Math.max(0, parseFloat(e.target.value) || 0))}
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3.5 py-2.5 text-sm font-mono text-slate-900 dark:text-white"
+              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3.5 py-2.5 text-sm font-mono tabular-nums text-slate-900 dark:text-white"
             />
           </div>
           <div>
-            <label className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+            <label htmlFor="anti-impulso-jornada" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
               Jornada Mensal de Trabalho
             </label>
             <select
+              id="anti-impulso-jornada"
               value={antiImpulsoJornada}
               onChange={(e) => setAntiImpulsoJornada(parseInt(e.target.value, 10) || 220)}
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3.5 py-2.5 text-sm text-slate-900 dark:text-white"
@@ -347,18 +354,21 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
         <div className="bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
             <span className="text-xs text-slate-500 dark:text-slate-400">Esforço Real de Trabalho Exigido:</span>
-            <div className="font-mono text-xl font-bold text-slate-900 dark:text-white mt-0.5">
-              {diasTrab > 0
-                ? `${diasTrab}d de 8h + ${horasRest}h ${minRest}min`
+            <div className="font-mono tabular-nums text-xl font-bold text-slate-900 dark:text-white mt-0.5">
+              {liquido <= 0
+                ? 'Cadastre seu salário líquido acima para calcular'
+                : diasTrab > 0
+                ? `${diasTrab}d de ${horasPorDia}h + ${horasRest}h ${minRest}min`
                 : `${horasRest}h e ${minRest}min de trabalho`}
             </div>
             <span className="text-xs text-slate-500 dark:text-slate-400">
-              Sua hora líquida vale <strong className="font-mono privacy-val">{fmtBRL(valorHora)}/h</strong>
+              Sua hora líquida vale <strong className="font-mono tabular-nums privacy-val">{fmtBRL(valorHora)}/h</strong>
             </span>
           </div>
           <div className="text-xs text-slate-600 dark:text-slate-300 max-w-xs">
-            Vale a pena trocar <strong>{totalHorasItem.toFixed(1)} horas</strong> da sua vida profissional por essa
-            compra hoje?
+            {liquido <= 0
+              ? 'Informe seus proventos e descontos para descobrir quanto tempo de vida cada compra custa.'
+              : <>Vale a pena trocar <strong>{totalHorasItem.toFixed(1)} horas</strong> da sua vida profissional por essa compra hoje?</>}
           </div>
         </div>
       </div>
@@ -377,6 +387,7 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
           <select
             value={historyFilter}
             onChange={(e) => setHistoryFilter(e.target.value as '6' | '12' | 'todos')}
+            aria-label="Filtrar período do histórico de contracheques"
             className="bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200"
           >
             <option value="6">Últimos 6 Meses</option>
@@ -387,20 +398,20 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-4">
-            <span className="text-xs font-semibold text-slate-500">Extras & Bônus Acumulados</span>
-            <div className="mt-1 font-mono text-lg font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
+            <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">Extras & Bônus Acumulados</span>
+            <div className="mt-1 font-mono tabular-nums text-lg font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
               {fmtBRL(totalAcrescimosPeriodo)}
             </div>
           </div>
           <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-4">
-            <span className="text-xs font-semibold text-slate-500">Total Descontado no Período</span>
-            <div className="mt-1 font-mono text-lg font-bold text-rose-600 dark:text-rose-400 privacy-val">
+            <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">Total Descontado no Período</span>
+            <div className="mt-1 font-mono tabular-nums text-lg font-bold text-rose-600 dark:text-rose-400 privacy-val">
               {fmtBRL(totalDescontosPeriodo)}
             </div>
           </div>
           <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-4">
-            <span className="text-xs font-semibold text-slate-500">Líquido Acumulado ({histList.length} meses)</span>
-            <div className="mt-1 font-mono text-lg font-bold text-slate-900 dark:text-white privacy-val">
+            <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">Líquido Acumulado ({histList.length} meses)</span>
+            <div className="mt-1 font-mono tabular-nums text-lg font-bold text-slate-900 dark:text-white privacy-val">
               {fmtBRL(totalLiquidoPeriodo)}
             </div>
           </div>
@@ -411,14 +422,14 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
             <div key={folha.id} className="py-3 flex items-center justify-between gap-4 text-xs">
               <div>
                 <span className="font-bold text-slate-900 dark:text-white">{folha.mesLabel}</span>
-                <span className="text-slate-400 mx-2">·</span>
-                <span className="text-slate-500 privacy-val">
-                  Bruto: <span className="font-mono">{fmtBRL(folha.bruto)}</span> · Descontos:{' '}
-                  <span className="font-mono">{fmtBRL(folha.descontosTotal)}</span>
+                <span className="text-slate-600 dark:text-slate-400 mx-2">·</span>
+                <span className="text-slate-500 dark:text-slate-400 privacy-val">
+                  Bruto: <span className="font-mono tabular-nums">{fmtBRL(folha.bruto)}</span> · Descontos:{' '}
+                  <span className="font-mono tabular-nums">{fmtBRL(folha.descontosTotal)}</span>
                 </span>
               </div>
               <div className="flex items-center gap-3">
-                <span className="font-mono font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
+                <span className="font-mono tabular-nums font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
                   {fmtBRL(folha.liquido)}
                 </span>
                 <button
@@ -430,7 +441,7 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
                 <button
                   onClick={() => onDeleteHistoryPayroll(folha.id)}
                   aria-label={`Remover histórico ${folha.mesLabel}`}
-                  className="min-h-[44px] min-w-[44px] p-2 rounded-lg text-slate-400 hover:text-rose-600 cursor-pointer inline-flex items-center justify-center"
+                  className="min-h-[44px] min-w-[44px] p-2 rounded-lg text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer inline-flex items-center justify-center"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
@@ -448,6 +459,7 @@ interface CardsTabProps {
   onOpenNewCard: () => void;
   onRequestEditCardInvoice: (cardId: string, cardNome: string, currentInvoice: number) => void;
   onDeleteCard: (cardId: string) => void;
+  onUpdateCard?: (card: CreditCard) => void;
 }
 
 export const CardsTab: React.FC<CardsTabProps> = ({
@@ -455,14 +467,68 @@ export const CardsTab: React.FC<CardsTabProps> = ({
   onOpenNewCard,
   onRequestEditCardInvoice,
   onDeleteCard,
+  onUpdateCard,
 }) => {
-  const cdiAnual = state.configuracoes.taxaCdiAnual || 10.75;
+  const cdiAnual = state.configuracoes.taxaCdiAnual ?? 10.75;
   const defaultMonthlyNetRate = Math.round(annualToMonthlyRate(cdiAnual) * 0.825 * 10000) / 100;
 
   const [simValor, setSimValor] = useState<number>(1200);
   const [simDesconto, setSimDesconto] = useState<number>(5);
   const [simParcelas, setSimParcelas] = useState<number>(10);
   const [simTaxaCdi, setSimTaxaCdi] = useState<number>(defaultMonthlyNetRate);
+
+  const [editingCardId, setEditingCardId] = useState<string | null>(null);
+  const [editCardName, setEditCardName] = useState('');
+  const [editCardLimit, setEditCardLimit] = useState('');
+  const [editCardCutoff, setEditCardCutoff] = useState('');
+  const [editCardDue, setEditCardDue] = useState('');
+  const [editCardBenefit, setEditCardBenefit] = useState<CreditCard['beneficio']>('Cashback');
+  const [editCardError, setEditCardError] = useState<string | null>(null);
+
+  const startEditCard = (card: CreditCard) => {
+    setEditingCardId(card.id);
+    setEditCardName(card.nome);
+    setEditCardLimit(String(card.limiteTotal ?? 5000));
+    setEditCardCutoff(String(card.diaCorte));
+    setEditCardDue(String(card.diaVencimento));
+    setEditCardBenefit(card.beneficio);
+    setEditCardError(null);
+  };
+
+  const handleSaveCard = (card: CreditCard) => {
+    const nome = editCardName.trim();
+    const limiteTotal = parseFloat(editCardLimit);
+    const diaCorte = parseInt(editCardCutoff, 10);
+    const diaVencimento = parseInt(editCardDue, 10);
+
+    if (!nome) {
+      setEditCardError('Informe o nome do cartão.');
+      return;
+    }
+    if (!Number.isFinite(limiteTotal) || limiteTotal <= 0) {
+      setEditCardError('Informe um limite total maior que zero.');
+      return;
+    }
+    if (!Number.isFinite(diaCorte) || diaCorte < 1 || diaCorte > 31) {
+      setEditCardError('Informe um dia de corte entre 1 e 31.');
+      return;
+    }
+    if (!Number.isFinite(diaVencimento) || diaVencimento < 1 || diaVencimento > 31) {
+      setEditCardError('Informe um dia de vencimento entre 1 e 31.');
+      return;
+    }
+
+    onUpdateCard?.({
+      ...card,
+      nome,
+      limiteTotal,
+      diaCorte,
+      diaVencimento,
+      beneficio: editCardBenefit,
+    });
+    setEditingCardId(null);
+    setEditCardError(null);
+  };
 
   const simResult = simulateCashVsInstallments(simValor, simDesconto, simParcelas, simTaxaCdi);
 
@@ -504,8 +570,8 @@ export const CardsTab: React.FC<CardsTabProps> = ({
                   <div>
                     <div className="flex items-center gap-2">
                       <h3 className="text-base font-bold text-slate-900 dark:text-white">{card.nome}</h3>
-                      <span className="text-slate-400">·</span>
-                      <span className="text-xs text-slate-500">{card.beneficio}</span>
+                      <span className="text-slate-600 dark:text-slate-400" aria-hidden="true">·</span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400">{card.beneficio}</span>
                     </div>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                       Fecha dia <strong>{card.diaCorte}</strong> · Vence dia <strong>{card.diaVencimento}</strong> ·{' '}
@@ -514,25 +580,180 @@ export const CardsTab: React.FC<CardsTabProps> = ({
                       </strong>
                     </p>
                   </div>
-                  <button
-                    onClick={() => onDeleteCard(card.id)}
-                    aria-label={`Remover cartão ${card.nome}`}
-                    className="min-h-[44px] min-w-[44px] p-2 text-slate-400 hover:text-rose-600 cursor-pointer inline-flex items-center justify-center rounded-lg"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        editingCardId === card.id ? setEditingCardId(null) : startEditCard(card)
+                      }
+                      aria-label={`Editar cartão ${card.nome}`}
+                      className="min-h-[44px] px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer inline-flex items-center justify-center gap-1.5"
+                    >
+                      <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
+                      <span>Editar</span>
+                    </button>
+                    <button
+                      onClick={() => onDeleteCard(card.id)}
+                      aria-label={`Remover cartão ${card.nome}`}
+                      className="min-h-[44px] min-w-[44px] p-2 text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 cursor-pointer inline-flex items-center justify-center rounded-lg"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
+
+                {editingCardId === card.id && (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      handleSaveCard(card);
+                    }}
+                    className="bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3"
+                  >
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="sm:col-span-2">
+                        <label
+                          htmlFor={`edit-card-name-${card.id}`}
+                          className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1"
+                        >
+                          Nome do Cartão
+                        </label>
+                        <input
+                          id={`edit-card-name-${card.id}`}
+                          type="text"
+                          value={editCardName}
+                          onChange={(e) => {
+                            setEditCardName(e.target.value);
+                            if (editCardError) setEditCardError(null);
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor={`edit-card-limit-${card.id}`}
+                          className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1"
+                        >
+                          Limite Total (R$)
+                        </label>
+                        <input
+                          id={`edit-card-limit-${card.id}`}
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={editCardLimit}
+                          onChange={(e) => {
+                            setEditCardLimit(e.target.value);
+                            if (editCardError) setEditCardError(null);
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor={`edit-card-benefit-${card.id}`}
+                          className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1"
+                        >
+                          Benefício
+                        </label>
+                        <select
+                          id={`edit-card-benefit-${card.id}`}
+                          value={editCardBenefit}
+                          onChange={(e) => setEditCardBenefit(e.target.value as CreditCard['beneficio'])}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white"
+                        >
+                          <option value="Cashback">Cashback</option>
+                          <option value="Milhas">Milhas</option>
+                          <option value="SemAnuidade">SemAnuidade</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor={`edit-card-cutoff-${card.id}`}
+                          className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1"
+                        >
+                          Dia de Corte
+                        </label>
+                        <input
+                          id={`edit-card-cutoff-${card.id}`}
+                          type="number"
+                          min="1"
+                          max="31"
+                          value={editCardCutoff}
+                          onChange={(e) => {
+                            setEditCardCutoff(e.target.value);
+                            if (editCardError) setEditCardError(null);
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor={`edit-card-due-${card.id}`}
+                          className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1"
+                        >
+                          Dia de Vencimento
+                        </label>
+                        <input
+                          id={`edit-card-due-${card.id}`}
+                          type="number"
+                          min="1"
+                          max="31"
+                          value={editCardDue}
+                          onChange={(e) => {
+                            setEditCardDue(e.target.value);
+                            if (editCardError) setEditCardError(null);
+                          }}
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                        />
+                      </div>
+                    </div>
+
+                    {editCardError && (
+                      <p role="alert" className="text-xs font-medium text-rose-600 dark:text-rose-400">
+                        {editCardError}
+                      </p>
+                    )}
+
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingCardId(null)}
+                        className="min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="submit"
+                        className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                      >
+                        Salvar
+                      </button>
+                    </div>
+                  </form>
+                )}
 
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs privacy-val">
-                    <span className="text-slate-500">
-                      Fatura Aberta: <strong className="font-mono text-slate-900 dark:text-white">{fmtBRL(fatura)}</strong>
+                    <span className="text-slate-500 dark:text-slate-400">
+                      Fatura Aberta: <strong className="font-mono tabular-nums text-slate-900 dark:text-white">{fmtBRL(fatura)}</strong>
                     </span>
-                    <span className="text-slate-500 font-mono">
+                    <span className="text-slate-500 dark:text-slate-400 font-mono tabular-nums">
                       {usoPct}% do limite ({fmtBRL(limite)})
                     </span>
                   </div>
-                  <div className="w-full h-1.5 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className="w-full h-1.5 bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden"
+                    role="progressbar"
+                    aria-label={`Uso do limite de ${card.nome}`}
+                    aria-valuenow={usoPct}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                  >
                     <div
                       className={`h-full rounded-full ${
                         usoPct > 70 ? 'bg-rose-500' : usoPct > 40 ? 'bg-amber-500' : 'bg-emerald-600'
@@ -543,8 +764,8 @@ export const CardsTab: React.FC<CardsTabProps> = ({
                 </div>
 
                 <div className="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between gap-2">
-                  <span className="text-xs text-slate-500 privacy-val">
-                    Limite disponível: <strong className="font-mono">{fmtBRL(Math.max(0, limite - fatura))}</strong>
+                  <span className="text-xs text-slate-500 dark:text-slate-400 privacy-val">
+                    Limite disponível: <strong className="font-mono tabular-nums">{fmtBRL(Math.max(0, limite - fatura))}</strong>
                   </span>
                   <button
                     onClick={() => {
@@ -577,36 +798,39 @@ export const CardsTab: React.FC<CardsTabProps> = ({
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div>
-            <label className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+            <label htmlFor="sim-valor" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
               Valor da Compra (R$)
             </label>
             <input
+              id="sim-valor"
               type="number"
               step="50"
               value={simValor}
               onChange={(e) => setSimValor(Math.max(0, parseFloat(e.target.value) || 0))}
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-white"
             />
           </div>
 
           <div>
-            <label className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+            <label htmlFor="sim-desconto" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
               Desconto à Vista no Pix (%)
             </label>
             <input
+              id="sim-desconto"
               type="number"
               step="0.5"
               value={simDesconto}
               onChange={(e) => setSimDesconto(Math.max(0, parseFloat(e.target.value) || 0))}
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-white"
             />
           </div>
 
           <div>
-            <label className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+            <label htmlFor="sim-parcelas" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
               Parcelas sem Juros
             </label>
             <select
+              id="sim-parcelas"
               value={simParcelas}
               onChange={(e) => setSimParcelas(parseInt(e.target.value, 10) || 10)}
               className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
@@ -620,15 +844,16 @@ export const CardsTab: React.FC<CardsTabProps> = ({
           </div>
 
           <div>
-            <label className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+            <label htmlFor="sim-taxa-cdi" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
               Rendimento Líquido CDI (% a.m.)
             </label>
             <input
+              id="sim-taxa-cdi"
               type="number"
               step="0.05"
               value={simTaxaCdi}
               onChange={(e) => setSimTaxaCdi(Math.max(0, parseFloat(e.target.value) || 0))}
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-white"
             />
           </div>
         </div>
@@ -640,30 +865,44 @@ export const CardsTab: React.FC<CardsTabProps> = ({
                 Veredito Matemático Auditado
               </span>
               <h4 className="text-base font-bold text-slate-900 dark:text-white mt-0.5">
-                {simResult.verdict === 'PARCELAR'
-                  ? `Compensa PARCELAR em ${simParcelas}x de ${fmtBRL(simResult.installmentValue)} e investir no CDI!`
-                  : simResult.verdict === 'A_VISTA'
-                  ? `Compensa PAGAR À VISTA por ${fmtBRL(simResult.cashPrice)}!`
-                  : 'Empate técnico entre pagar à vista ou parcelar.'}
+                {simResult.verdict === 'PARCELAR' ? (
+                  <>
+                    Compensa PARCELAR em {simParcelas}x de{' '}
+                    <span className="font-mono tabular-nums privacy-val">{fmtBRL(simResult.installmentValue)}</span> e
+                    investir no CDI!
+                  </>
+                ) : simResult.verdict === 'A_VISTA' ? (
+                  <>
+                    Compensa PAGAR À VISTA por{' '}
+                    <span className="font-mono tabular-nums privacy-val">{fmtBRL(simResult.cashPrice)}</span>!
+                  </>
+                ) : (
+                  'Empate técnico entre pagar à vista ou parcelar.'
+                )}
               </h4>
             </div>
-            <div className="font-mono text-sm font-bold text-emerald-700 dark:text-emerald-400">
-              Vantagem real: + {fmtBRL(Math.abs(simResult.netAdvantageForInstallments))}
+            <div className="font-mono tabular-nums text-sm font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
+              Vantagem real: + {fmtBRL(Math.max(0, Math.abs(simResult.netAdvantageForInstallments)))}
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-3 border-t border-slate-200/70 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300">
             <div>
-              Preço à Vista ({simDesconto}%): <strong className="font-mono">{fmtBRL(simResult.cashPrice)}</strong>
+              Preço à Vista ({simDesconto}%):{' '}
+              <strong className="font-mono tabular-nums privacy-val">{fmtBRL(simResult.cashPrice)}</strong>
             </div>
             <div>
-              Desconto imediato: <strong className="font-mono">{fmtBRL(simResult.immediateDiscountValue)}</strong>
+              Desconto imediato:{' '}
+              <strong className="font-mono tabular-nums privacy-val">{fmtBRL(simResult.immediateDiscountValue)}</strong>
             </div>
             <div>
-              Juros ganhos no CDI: <strong className="font-mono">+{fmtBRL(simResult.totalInterestEarned)}</strong>
+              Juros ganhos no CDI:{' '}
+              <strong className="font-mono tabular-nums privacy-val">
+                +{fmtBRL(Math.max(0, simResult.totalInterestEarned))}
+              </strong>
             </div>
             <div>
-              Desconto de equilíbrio: <strong className="font-mono">{simResult.breakEvenDiscountPct}%</strong>
+              Desconto de equilíbrio: <strong className="font-mono tabular-nums">{simResult.breakEvenDiscountPct}%</strong>
             </div>
           </div>
         </div>

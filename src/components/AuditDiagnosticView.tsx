@@ -8,14 +8,9 @@ import {
   calculateGoalMonthsCompound,
 } from '../utils/financeMath';
 import {
-  CheckCircle2,
   Calculator,
-  LayoutGrid,
   Sparkles,
-  Wrench,
   ArrowRight,
-  Scale,
-  ShieldCheck,
 } from 'lucide-react';
 
 interface AuditDiagnosticViewProps {
@@ -24,16 +19,25 @@ interface AuditDiagnosticViewProps {
 }
 
 export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state, onNavigate }) => {
-  const cdiAnual = state.configuracoes.taxaCdiAnual || 10.75;
+  const cdiAnual = state.configuracoes.taxaCdiAnual ?? 10.75;
   const taxaLinearErrada = cdiAnual / 100 / 12;
   const taxaCompostaCorreta = annualToMonthlyRate(cdiAnual);
 
-  const saldoRendendo = state.bancos
-    .filter((b) => b.rendeJuros)
-    .reduce((acc, b) => acc + b.saldo, 0);
-
-  const yieldAntigoLinear = saldoRendendo * taxaLinearErrada;
-  const yieldNovoComposto = calculateCdiMonthlyYield(saldoRendendo, 100, cdiAnual, 17.5);
+  const bancosRendendo = state.bancos.filter((b) => b.rendeJuros);
+  const yieldAntigoLinear = bancosRendendo.reduce(
+    (acc, b) => acc + (b.saldo || 0) * taxaLinearErrada * ((b.pctCDI ?? 100) / 100),
+    0
+  );
+  const yieldNovoComposto = bancosRendendo.reduce(
+    (acc, b) => {
+      const y = calculateCdiMonthlyYield(b.saldo || 0, b.pctCDI ?? 100, cdiAnual, 17.5);
+      return {
+        grossMonthly: acc.grossMonthly + y.grossMonthly,
+        netMonthly: acc.netMonthly + y.netMonthly,
+      };
+    },
+    { grossMonthly: 0, netMonthly: 0 }
+  );
 
   const cxEmergencia = state.caixinhas.find((c) => c.tipo === 'emergencia') || state.caixinhas[0];
   const goalMath = cxEmergencia
@@ -69,9 +73,10 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
           Raio-X do Seu Aplicativo Financeiro: O que estava ótimo e o que foi aprimorado
         </h2>
         <p className="mt-2 text-sm text-slate-600 dark:text-slate-300 max-w-3xl leading-relaxed">
-          Seu aplicativo original já tinha ideias excelentes que muitos apps comerciais não têm — como a{' '}
+          Seu aplicativo reúne recursos essenciais para gestão financeira pessoal — como a{' '}
           <strong>Diária Segura até o próximo pagamento</strong>, a <strong>Calculadora Anti-Impulso em horas de vida</strong> e o{' '}
-          <strong>Molde de Contas Recorrentes</strong>. Abaixo está a análise ponto a ponto das suas 6 perguntas e as melhorias já implementadas nesta versão.
+          <strong>Molde de Contas Recorrentes</strong>. Abaixo está o{' '}
+          <strong>Diagnóstico Técnico & Auditoria Matemática</strong> com a verificação em tempo real das fórmulas aplicadas aos seus dados.
         </p>
       </div>
 
@@ -91,7 +96,7 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               <span className="font-mono text-xs">JetBrains Mono</span> para todos os valores monetários, alinhando casas decimais perfeitamente.
             </p>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500">
+          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
             Padrão SaaS Financeiro · Alto Contraste WCAG AA
           </div>
         </div>
@@ -109,7 +114,7 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               Corrigimos a conversão de taxa anual para mensal por equivalência composta <span className="font-mono text-xs">(1+i)^(1/12)-1</span>, o desconto de IR regressivo no CDI, a simetria de estorno bancário e a divergência na fórmula FIRE entre abas.
             </p>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500">
+          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
             Auditado com testes automatizados determinísticos
           </div>
         </div>
@@ -128,7 +133,7 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               <strong>Essenciais (50%)</strong>, <strong>Estilo de Vida (30%)</strong> e <strong>Futuro (20%)</strong> e desconta seus gastos reais dos envelopes!
             </p>
           </div>
-          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500">
+          <div className="mt-4 pt-3 border-t border-slate-100 dark:border-slate-800 text-xs text-slate-500 dark:text-slate-400">
             Conciliação bancária e faturas integradas
           </div>
         </div>
@@ -152,16 +157,16 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
                 1. Conversão de CDI Anual para Mensal & Imposto de Renda
               </h4>
               <p className="text-xs text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
-                No código anterior, a taxa anual era dividida por 12 (<span className="font-mono">taxaAnual / 12</span>) e ignorava o Imposto de Renda regressivo dos CDBs/Caixinhas. Em juros compostos, a taxa mensal correta é{' '}
+                Em cálculos lineares simplificados, a taxa anual costuma ser dividida por 12 (<span className="font-mono">taxaAnual / 12</span>), ignorando o Imposto de Renda regressivo dos CDBs/Caixinhas. Em juros compostos, a taxa mensal correta é{' '}
                 <span className="font-mono">(1 + i_anual)^(1/12) - 1</span>.
               </p>
             </div>
             <div className="lg:col-span-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
-              <span className="text-xs text-slate-500 block">Cálculo Antigo (Linear Bruto)</span>
-              <span className="font-mono text-sm font-semibold text-slate-700 dark:text-slate-300">
+              <span className="text-xs text-slate-600 dark:text-slate-400 block">Cálculo Antigo (Linear Bruto)</span>
+              <span className="font-mono tabular-nums text-sm font-semibold text-slate-700 dark:text-slate-300 privacy-val">
                 + {fmtBRL(yieldAntigoLinear)}/mês
               </span>
-              <span className="text-[11px] text-slate-400 block mt-0.5">
+              <span className="text-[11px] text-slate-600 dark:text-slate-400 block mt-0.5">
                 Taxa linear {(taxaLinearErrada * 100).toFixed(3)}% a.m. sem IR
               </span>
             </div>
@@ -169,10 +174,10 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               <span className="text-xs text-emerald-800 dark:text-emerald-300 font-medium block">
                 Cálculo Corrigido (Composto Bruto & Líquido)
               </span>
-              <span className="font-mono text-sm font-bold text-emerald-700 dark:text-emerald-400">
+              <span className="font-mono tabular-nums text-sm font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
                 + {fmtBRL(yieldNovoComposto.netMonthly)}/mês líquidos
               </span>
-              <span className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 block mt-0.5">
+              <span className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 block mt-0.5 font-mono tabular-nums privacy-val">
                 Bruto: {fmtBRL(yieldNovoComposto.grossMonthly)} ({(taxaCompostaCorreta * 100).toFixed(3)}% a.m.) - IR
               </span>
             </div>
@@ -190,11 +195,11 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               </p>
             </div>
             <div className="lg:col-span-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
-              <span className="text-xs text-slate-500 block">Comportamento Antigo</span>
-              <span className="font-mono text-sm font-semibold text-rose-600 dark:text-rose-400">
+              <span className="text-xs text-slate-600 dark:text-slate-400 block">Comportamento Antigo</span>
+              <span className="font-mono tabular-nums text-sm font-semibold text-rose-600 dark:text-rose-400">
                 R$ 100 - R$ 150 → R$ 0
               </span>
-              <span className="text-[11px] text-slate-400 block mt-0.5">
+              <span className="text-[11px] text-slate-600 dark:text-slate-400 block mt-0.5">
                 Ao estornar: R$ 0 + R$ 150 = R$ 150 (Erro +R$ 50)
               </span>
             </div>
@@ -202,7 +207,7 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               <span className="text-xs text-emerald-800 dark:text-emerald-300 font-medium block">
                 Contabilidade Simétrica Corrigida
               </span>
-              <span className="font-mono text-sm font-bold text-emerald-700 dark:text-emerald-400">
+              <span className="font-mono tabular-nums text-sm font-bold text-emerald-700 dark:text-emerald-400">
                 R$ 100 - R$ 150 → -R$ 50
               </span>
               <span className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 block mt-0.5">
@@ -222,17 +227,21 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               </p>
             </div>
             <div className="lg:col-span-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
-              <span className="text-xs text-slate-500 block">Sem Juros Compostos</span>
-              <span className="font-mono text-sm font-semibold text-slate-700 dark:text-slate-300">
-                {goalMath ? `${goalMath.monthsLinear} meses` : '12 meses'}
+              <span className="text-xs text-slate-600 dark:text-slate-400 block">Sem Juros Compostos</span>
+              <span className="font-mono tabular-nums text-sm font-semibold text-slate-700 dark:text-slate-300">
+                {goalMath
+                  ? Number.isFinite(goalMath.monthsLinear)
+                    ? `${goalMath.monthsLinear} meses`
+                    : 'Sem prazo (aporte R$ 0)'
+                  : '12 meses'}
               </span>
-              <span className="text-[11px] text-slate-400 block mt-0.5">Ignorava o rendimento da própria caixinha</span>
+              <span className="text-[11px] text-slate-600 dark:text-slate-400 block mt-0.5">Ignorava o rendimento da própria caixinha</span>
             </div>
             <div className="lg:col-span-4 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/50 rounded-lg p-3">
               <span className="text-xs text-emerald-800 dark:text-emerald-300 font-medium block">
                 Com Juros Compostos do CDI
               </span>
-              <span className="font-mono text-sm font-bold text-emerald-700 dark:text-emerald-400">
+              <span className="font-mono tabular-nums text-sm font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
                 {goalMath ? `${goalMath.monthsCompound} meses` : '11 meses'} (+{fmtBRL(goalMath?.totalInterestEarned || 0)} de juros)
               </span>
               <span className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 block mt-0.5">
@@ -252,20 +261,20 @@ export const AuditDiagnosticView: React.FC<AuditDiagnosticViewProps> = ({ state,
               </p>
             </div>
             <div className="lg:col-span-3 bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
-              <span className="text-xs text-slate-500 block">Antes (Inconsistente)</span>
+              <span className="text-xs text-slate-600 dark:text-slate-400 block">Antes (Inconsistente)</span>
               <span className="font-mono text-sm font-semibold text-slate-700 dark:text-slate-300">
                 2 prazos diferentes
               </span>
-              <span className="text-[11px] text-slate-400 block mt-0.5">Misturava dinheiro de giro com aposentadoria</span>
+              <span className="text-[11px] text-slate-600 dark:text-slate-400 block mt-0.5">Misturava dinheiro de giro com aposentadoria</span>
             </div>
             <div className="lg:col-span-4 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/50 rounded-lg p-3">
               <span className="text-xs text-emerald-800 dark:text-emerald-300 font-medium block">
                 Meta FIRE Unificada (SWR {state.configuracoes.swrAnualPct}%)
               </span>
-              <span className="font-mono text-sm font-bold text-emerald-700 dark:text-emerald-400">
+              <span className="font-mono tabular-nums text-sm font-bold text-emerald-700 dark:text-emerald-400 privacy-val">
                 Meta: {fmtBRL(fireMath.targetPatrimony)} ({fireMath.yearsToFire ?? '--'} anos)
               </span>
-              <span className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 block mt-0.5">
+              <span className="text-[11px] text-emerald-700/80 dark:text-emerald-400/80 block mt-0.5 font-mono tabular-nums privacy-val">
                 Renda passiva atual: {fmtBRL(fireMath.currentSafeMonthlyIncome)}/mês
               </span>
             </div>

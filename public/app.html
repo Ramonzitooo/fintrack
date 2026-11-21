@@ -6022,7 +6022,7 @@ function renderizarTudo() {
               </span>
             </div>
             <div class="item-detail" style="margin-top: 4px;">
-              Tipo: <strong>${b.tipo}</strong> | Fatia no patrimônio: <strong>${fatia}%</strong>
+              Tipo: <strong>${escapeHtml(b.tipo)}</strong> | Fatia no patrimônio: <strong>${fatia}%</strong>
             </div>
             <div style="font-size: 0.78rem; margin-top: 4px; color: ${b.rendeJuros ? '#047857' : 'var(--text-secondary)'};">
               ${b.rendeJuros ? `${getM3Icon("trending_up")} Rendimento automático estimado: <strong>+ ${fmtBRL(rendimentoEsteBanco)}/mês</strong> sem risco` : `${getM3Icon("pause")} Dinheiro parado para giro imediato ou espécie física`}
@@ -6031,9 +6031,9 @@ function renderizarTudo() {
           <div class="item-values">
             <div class="item-main-val" style="font-size: 1.25rem;">${fmtBRL(b.saldo)}</div>
             <div style="display: flex; gap: 6px; margin-top: 6px;">
-              <button class="btn btn-outline btn-sm" onclick="ajustarSaldoBanco('${b.id}')">${getM3Icon("edit")} <span>Ajustar saldo</span></button>
+              <button class="btn btn-outline btn-sm" onclick="ajustarSaldoBanco('${escapeHtml(b.id)}')">${getM3Icon("edit")} <span>Ajustar saldo</span></button>
               <button class="btn btn-outline btn-sm" onclick="abrirModalTransferencia()">${getM3Icon("sync")} <span>Transferir via Pix</span></button>
-              <button class="btn btn-danger btn-sm" onclick="removerBanco('${b.id}')" aria-label="Remover conta ${escapeHtml(b.nome)}">${getM3Icon("delete")}</button>
+              <button class="btn btn-danger btn-sm" onclick="removerBanco('${escapeHtml(b.id)}')" aria-label="Remover conta ${escapeHtml(b.nome)}">${getM3Icon("delete")}</button>
             </div>
           </div>
         </div>
@@ -6702,13 +6702,14 @@ function validarEHigienizarBackup(obj) {
   }
 
   // 1. Bancos
+  const TIPOS_BANCO_SEGUROS = ["Conta Digital", "Conta Corrente", "Investimento", "Dinheiro Físico", "Corrente", "Poupança"];
   const listaBancos = dadosFonte.bancos || obj.bancos;
   if (Array.isArray(listaBancos)) {
     estadoLimpo.bancos = listaBancos.map((b, idx) => ({
       id: String(b.id || `b_${idx + 1}`).replace(/[^a-zA-Z0-9_-]/g, ""),
       nome: String(b.nome || "Conta").slice(0, 100).trim(),
       saldo: Number.isFinite(Number(b.saldo)) ? Number(b.saldo) : 0,
-      tipo: String(b.tipo || "Corrente").slice(0, 50),
+      tipo: TIPOS_BANCO_SEGUROS.includes(b.tipo) ? b.tipo : "Corrente",
       rendeJuros: Boolean(b.rendeJuros),
       pctCDI: Number.isFinite(Number(b.pctCDI)) ? Number(b.pctCDI) : 0
     })).filter(b => b.id.length > 0);
@@ -7278,8 +7279,8 @@ function abrirModalTransferencia() {
   const selOrigem = document.getElementById("transfOrigem");
   const selDestino = document.getElementById("transfDestino");
   
-  selOrigem.innerHTML = appState.bancos.map(b => `<option value="${b.id}">${b.nome} (${fmtBRL(b.saldo)})</option>`).join("");
-  selDestino.innerHTML = appState.bancos.map((b, i) => `<option value="${b.id}" ${i === 1 ? 'selected' : ''}>${b.nome} (${fmtBRL(b.saldo)})</option>`).join("");
+  selOrigem.innerHTML = appState.bancos.map(b => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.nome)} (${fmtBRL(b.saldo)})</option>`).join("");
+  selDestino.innerHTML = appState.bancos.map((b, i) => `<option value="${escapeHtml(b.id)}" ${i === 1 ? 'selected' : ''}>${escapeHtml(b.nome)} (${fmtBRL(b.saldo)})</option>`).join("");
   
   document.getElementById("transfValor").value = "";
   exibirModal("modalTransferencia");
@@ -7410,7 +7411,7 @@ function abrirAporteCaixinha(id) {
   document.getElementById("aporteCaixinhaValor").value = cx.aporteMensal || 200;
 
   const select = document.getElementById("aporteCaixinhaBancoOrigem");
-  select.innerHTML = appState.bancos.map(b => `<option value="${b.id}">${b.nome} (Saldo: ${fmtBRL(b.saldo)})</option>`).join("");
+  select.innerHTML = appState.bancos.map(b => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.nome)} (Saldo: ${fmtBRL(b.saldo)})</option>`).join("");
 
   exibirModal("modalAporteCaixinha");
 }

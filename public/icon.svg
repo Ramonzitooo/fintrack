@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="FinTrack">
+  <rect width="512" height="512" fill="#006D44" />
+  <path
+    d="M256 96L128 148v104c0 88.4 54.6 168.8 128 196 73.4-27.2 128-107.6 128-196V148L256 96z"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-width="24"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M176 296l52-52 40 36 68-76"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-width="24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M296 204h40v40"
+    fill="none"
+    stroke="#FFFFFF"
+    stroke-width="24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

@@ -29,6 +29,8 @@ const cssFile = assetFiles.find(f => f.endsWith('.css'));
 let cssContent = '';
 if (cssFile) {
   cssContent = fs.readFileSync(path.join(assetsDir, cssFile), 'utf8');
+  // Sanitizar qualquer fechamento prematuro de tag style no bundle
+  cssContent = cssContent.replace(/<\/style/gi, '<\\/style');
 }
 
 let jsContent = '';
@@ -50,11 +52,10 @@ const standaloneHtml = `<!doctype html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';" />
     <title>FinTrack — Controle Financeiro Pessoal & Patrimonial</title>
     <meta name="description" content="Plataforma completa de controle financeiro pessoal, orçamento 50/30/20, gestão de caixinhas com juros compostos, contracheque, cartões de crédito e planejamento de aposentadoria FIRE." />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet">
     <style>
 ${cssContent}
     </style>

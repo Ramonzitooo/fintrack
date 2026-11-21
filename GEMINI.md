@@ -7,11 +7,11 @@
 
 ## 1. Visão Geral do Projeto
 
-O **FinTrack** é um ecossistema de inteligência financeira pessoal e planejamento patrimonial projetado sob a filosofia **100% Client-Side e Offline-First**.
+O **FinTrack** é um ecossistema de inteligência financeira pessoal e planejamento patrimonial projetado sob a filosofia **100% Client-Side e PWA Offline-First** (CSP estrita e zero fontes externas).
 
 A aplicação opera em duas frentes interoperáveis:
-1. **Aplicação Principal (v4.0):** Construída em **React 19 + TypeScript + Vite 8 + Tailwind CSS v4**, modularizada em componentes reativos, tipagem estrita e animações aceleradas via Motion.
-2. **Aplicação Monolítica Standalone (v3.4):** Preservada em arquivo único ([`public/app.html`](./public/app.html)), operando sem qualquer necessidade de build.
+1. **Aplicação Principal (v4.0):** Construída em **React 19 + TypeScript + Vite 8 + Tailwind CSS v4**, modularizada em componentes reativos, tipagem estrita (`strict: true`), Cofre Zero-Knowledge AES-256-GCM (interoperável com `.vault` v3.4) e animações aceleradas via Motion.
+2. **Aplicação Monolítica Standalone (v3.4):** Preservada em arquivo único ([`public/app.html`](./public/app.html)), operando em JavaScript Vanilla puro sem necessidade de build.
 
 ### Pilares Fundamentais
 1. **Soberania e Privacidade:** Arquitetura *Zero-Knowledge* — nenhum dado financeiro trafega pela internet.
@@ -31,8 +31,9 @@ A aplicação opera em duas frentes interoperáveis:
 │ • Camada Estilo:   Tailwind CSS v4 + Tokens HCT M3 Expressive          │
 │ • Camada Build:    Vite 8 (ES2022 / Bundler) — Tempo de build < 500ms  │
 │ • Versão Legado:   HTML5 + CSS3 + JS Vanilla autocontido (app.html)    │
-│ • Armazenamento:   Web Storage (localStorage) com Potes Segregados     │
-│ • Testes & CI/CD:  Node.js Native Test Suite (20 testes unitários TS + 6 suítes legado) │
+│ • Armazenamento:   Web Storage (localStorage) + Cofre AES-256-GCM      │
+│ • PWA & Blindagem: Offline-First (Service Worker + CSP + zero fontes externas) │
+│ • Testes & CI/CD:  Node.js Native Test Suite (37 testes unitários TS: 28 financeMath + 9 cryptoVault + 6 suítes legado) │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -40,10 +41,11 @@ A aplicação opera em duas frentes interoperáveis:
 
 * **Front-end & Interface:**
   * **HTML5 Semântico:** Uso rigoroso de tags semânticas (`<header>`, `<nav>`, `<main>`, `<section>`, `<article>`, `<dialog>`), atributos `role="tablist"`, `role="tab"`, `role="dialog"` e regiões ao vivo `aria-live="polite"` para leitores de tela (TalkBack, NVDA e VoiceOver).
-  * **CSS3 Nativo com Tokens HCT:** Sistema de variáveis CSS sem dependência de pré-processadores. Paleta tonal gerada pelo algoritmo HCT (*Hue, Chroma, Tone*) do Material 3, com suporte dinâmico a tema claro e escuro (`[data-theme="dark"]`).
-  * **JavaScript Puro (Vanilla ES2022+):** Sem inchaço de dependências (zero React, Vue, Angular ou jQuery em runtime). Tempo de inicialização inferior a 30ms e consumo mínimo de memória RAM.
+  * **CSS3 Nativo com Tokens HCT:** Sistema de variáveis CSS sem dependência de pré-processadores. Paleta tonal gerada pelo algoritmo HCT (*Hue, Chroma, Tone*) do Material 3, com suporte dinâmico a tema claro e escuro (`[data-theme="dark"]`) e pilha tipográfica nativa do sistema (**zero fontes externas**, garantindo operação **PWA Offline-First** sob **CSP** estrita).
+  * **Runtime Modular v4.0 (`src/`):** **React 19 + TypeScript (`strict`) + Vite 8 + Tailwind CSS v4 + Motion**, compilado tanto para deploy PWA quanto para bundle standalone (`./app.html`).
+  * **JavaScript Puro (Vanilla ES2022+) — Exclusivo do Monólito Legado (`public/app.html` v3.4):** Aplicado apenas à edição monolítica legada, sem React, Vue, Angular ou jQuery em runtime, mantendo inicialização instantânea (< 30ms) e consumo mínimo de memória RAM.
 
-* **Segurança e Criptografia em Repouso (Edição Monolítica v3.4 `public/app.html`):**
+* **Segurança e Criptografia em Repouso (Ativo na v4.0 React via `src/utils/cryptoVault.ts` e interoperável com `.vault` da edição monolítica v3.4 `public/app.html`):**
   * **W3C WebCrypto API Nativa:** Criptografia operada na CPU do dispositivo.
   * **KDF (Key Derivation Function):** PBKDF2-HMAC-SHA256 com **600.000 iterações**, em conformidade estrita com as normas OWASP para derivação da chave mestra a partir da senha do usuário.
   * **Cifragem Autenticada (AEAD):** AES-GCM de 256 bits com Vetor de Inicialização (IV) de 96 bits (12 bytes) gerado via gerador pseudoaleatório criptograficamente seguro (`crypto.getRandomValues`) e tag de autenticação de 128 bits.
@@ -69,7 +71,7 @@ O FinTrack adota a especificação **Google Material 3 (M3 Expressive)** enrique
 
 ### 3.2. Grade Espacial e Tipografia
 * **Grade Espacial 8pt / 4pt:** Todos os espaçamentos, margens e paddings seguem rigorosamente múltiplos de 8px e micro-espaçamentos de 4px (`--space-05` a `--space-8`), eliminando números mágicos.
-* **Escala Tipográfica Hierárquica:** Baseada na família **Google Sans** e **Roboto Flex**, variando de Display Large (`font-display-lg`: 2.5rem/800) a Legendas (`font-label-sm`: 0.6875rem/700).
+* **Escala Tipográfica Hierárquica:** Pilha de fontes nativas do sistema (zero fontes externas, em conformidade com PWA Offline-First e CSP estrita), variando de Display Large (`font-display-lg`: 2.5rem/800) a Legendas (`font-label-sm`: 0.6875rem/700).
 * **Tipografia Numérica Tabular Universal:** Todas as células de valores monetários, tabelas e badges utilizam `font-variant-numeric: tabular-nums lining-nums` e `font-feature-settings: "tnum" 1, "lnum" 1`. Isso garante que dígitos possuam a mesma largura física, eliminando qualquer tremulação (*jitter*) ou deslocamento de layout (*Layout Shift*) em atualizações em tempo real.
 
 ### 3.3. Conformidade Estética e Acessibilidade (WCAG 2.2 AA)
@@ -108,7 +110,7 @@ A navegação primária organiza o ciclo financeiro do usuário em **6 abas can�
    * **Mentor Financeiro Determinístico:** Painel de inteligência que analisa a distribuição do patrimônio e emite alertas comportamentais baseados em evidências.
 
 2. **Bancos & Saldos (`tab-bancos`):**
-   * Gestão de contas bancárias, contas de pagamento e carteira física.
+   * Gestão de contas bancárias, contas de pagamento e carteira física com **edição inline (CRUD)** de instituição, modalidade, saldo e rentabilidade.
    * Classificação por modalidade: Corrente, Poupança, Investimentos ou Carteira.
    * Marcador de rentabilidade automática (Rende 100% CDI vs. Dinheiro Parado sem rendimento).
    * KPIs de liquidez total, volume rendendo juros e rendimento passivo mensal estimado.
@@ -117,26 +119,29 @@ A navegação primária organiza o ciclo financeiro do usuário em **6 abas can�
 3. **Caixinhas & Aposentadoria (`tab-caixinhas`):**
    * Arquitetura estratégica dos **3 Potes**: Reserva de Emergência (6 meses de despesas fixas), Metas de Médio Prazo e Aposentadoria Perpétua (FIRE).
    * Radar de Aposentadoria com cálculo do Patrimônio Crítico via SWR padrão de 4,0% a.a. (configurável em `src/`, 4,5% a.a. no monólito v3.4) e renda passiva perpétua.
-   * Cards interativos de caixinhas com progresso percentual, aporte mensal programado e botão de aporte rápido.
+   * Cards interativos de caixinhas com **edição inline (CRUD)**, progresso percentual, aporte mensal programado e botão de aporte rápido.
 
 4. **Contracheque & Salário (`tab-contracheque`):**
    * Configuração da cadência de pagamento: 5º dia útil (com salto automático de sábados e domingos), dia fixo mensal ou data personalizada.
-   * Discriminação de proventos (salário base, bonificações, extras) e descontos legais (INSS, IRRF, benefícios).
+   * Discriminação de proventos (salário base, bonificações, extras) e descontos legais calculados automaticamente pelas **tabelas oficiais INSS/IRRF 2026 (Lei 15.270/2025)** com suporte a dependentes.
    * Botão de execução **"Receber Salário"**: credita o valor líquido na conta bancária de escolha e executa automaticamente as transferências para as caixinhas programadas.
    * **Motor Anti-Impulso de "Horas de Vida":** Converte o valor de qualquer compra no tempo líquido exato de trabalho necessário para quitá-la com base no valor-hora oficial da CLT.
    * Histórico de folhas de pagamento com relatórios de evolução salarial.
 
 5. **Cartões de Crédito (`tab-cartoes`):**
-   * Cadastro de cartões com dias de fechamento/corte de fatura, dias de vencimento e programa de fidelidade/pontos.
+   * Cadastro e **edição inline (CRUD)** de cartões com dias de fechamento/corte de fatura, dias de vencimento, limite e programa de fidelidade/pontos.
    * **Algoritmo da Janela de Ouro:** Aponta qual cartão oferece o maior prazo sem juros para uma compra realizada na data atual (até 35 a 40 dias de prazo).
    * **Simulador À Vista vs. Parcelado + CDI:** Avalia matematicamente se o desconto à vista supera o rendimento obtido ao manter o dinheiro na conta rendendo 100% do CDI durante as parcelas.
 
-6. **Despesas & Envelopes (`tab-despesas`):**
+6. **Despesas, Receitas Avulsas, Envelopes & Dívidas (`tab-despesas`):**
    * Monitor da competência ativa: Total lançado, contas já quitadas, contas pendentes e progresso de quitação.
+   * **Parcelas Multi-Mês (1x a 48x):** Geração automática de parcelas distribuídas nas competências futuras (`generateInstallmentExpenses`), com preservação de grupo de parcelamento e ajuste de centavos na primeira parcela.
+   * **Receitas Avulsas Mensais (`receitasPorMes`):** Cadastro, marcação de recebimento e exclusão de entradas extras integradas ao fluxo de caixa.
+   * **Simulador de Quitação de Dívidas (Avalanche vs. Bola de Neve):** Comparação determinística (`simulateDebtPayoff`) entre priorização por maior taxa de juros (*Avalanche*) e menor saldo devedor (*Bola de Neve*), exibindo prazo, juros totais e ordem de quitação.
    * **Fatiador Semanal de Envelopes:** Decomposição dos gastos variáveis mensais em metas de consumo semanal ou quinzenal para Supermercado, Lazer e Combustível.
    * **Lançamento Rápido em 1 Toque:** Chips ergonômicos com atalhos de valor (R$ 15, R$ 30, R$ 50, R$ 100, R$ 200).
    * **Molde de Despesas Fixas Recorrentes:** Cadastro de despesas molde (aluguel, condomínio, internet, luz) que são replicadas automaticamente a cada nova competência mensal.
-   * Listagem de lançamentos com status de quitação (Paga/Pendente), filtro por categorias e estorno automático com recomposição do saldo da conta bancária de débito.
+   * Listagem de lançamentos com **edição inline (CRUD)**, status de quitação (Paga/Pendente), filtro por categorias e estorno automático com recomposição do saldo da conta bancária de débito.
 
 ---
 
@@ -253,10 +258,10 @@ Nenhuma funcionalidade, tela ou refatoração é considerada concluída (`STATUS
 3. **Aval de Acessibilidade (`@M3UX`):** Verificação de contraste WCAG 2.2 AA, alvos de 48px e vedação completa de saldos no modo privacidade.
 
 ### 6.3. Lei de Verificação Prévia
-Nenhuma conclusão de tarefa pode ser declarada sem evidência de teste executado no terminal. A suíte de testes do projeto deve rodar e retornar código 0 antes de qualquer entrega:
+Nenhuma conclusão de tarefa pode ser declarada sem evidência de teste executado no terminal. A suíte de testes do projeto (37 testes unitários TS: 28 `financeMath` + 9 `cryptoVault`, além das suítes legado) deve rodar e retornar código 0 antes de qualquer entrega:
 
 ```powershell
-node tests/audit.js; node tests/backup_structure.test.js; node tests/financial_math.test.js
+npm run lint; npm test; node tests/audit.js; node tests/backup_structure.test.js; node tests/financial_math.test.js
 ```
 
 ---
@@ -283,7 +288,7 @@ PROJETOS/APPS/APP FINANCEIRO/
 │   ├── main.tsx                 # Ponto de entrada React
 │   ├── README.md                # Contrato EGM do pacote src
 │   ├── components/              # Componentes das 6 abas, modais (AppModals) e diagnóstico
-│   └── utils/                   # Matemática financeira (financeMath.ts) e persistência (storage.ts)
+│   └── utils/                   # Matemática financeira (financeMath.ts), Cofre AES-256-GCM (cryptoVault.ts), persistência (storage.ts) e 37 testes unitários TS (28 financeMath + 9 cryptoVault)
 ├── scripts/
 │   └── build-standalone.js      # Empacotador do bundle autocontido (dist/standalone.html e app.html)
 ├── public/

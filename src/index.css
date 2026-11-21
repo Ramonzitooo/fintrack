@@ -89,8 +89,15 @@ body.privacy-mode .privacy-val {
 
 body.privacy-mode .privacy-val:hover,
 body.privacy-mode .privacy-val:focus,
+body.privacy-mode .privacy-val:focus-visible,
 body.privacy-mode .privacy-val:focus-within {
   filter: blur(0);
+}
+
+@media print {
+  body.privacy-mode .privacy-val {
+    visibility: hidden !important;
+  }
 }
 
 /* High-contrast keyboard focus ring (WCAG 2.2 AA/AAA) */

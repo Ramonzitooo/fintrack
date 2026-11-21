@@ -13,7 +13,24 @@ if not exist "%GH_EXE%" (
     set "GH_EXE=gh"
 )
 
-echo [1/3] Verificando autenticação no GitHub...
+echo [1/4] Executando verificação de tipos e testes...
+call npm run lint
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [ERRO] Falha na verificação de tipos ^(npm run lint^). Publicação abortada.
+    pause
+    exit /b 1
+)
+call npm test
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [ERRO] Falha nos testes ^(npm test^). Publicação abortada.
+    pause
+    exit /b 1
+)
+
+echo.
+echo [2/4] Verificando autenticação no GitHub...
 "%GH_EXE%" auth status >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
     echo Você ainda não está autenticado no GitHub CLI.
@@ -28,17 +45,23 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
-echo [2/3] Criando repositório público Ramonzitooo/fintrack e enviando código...
+echo [3/4] Criando repositório público Ramonzitooo/fintrack e enviando código...
 git remote remove origin >nul 2>&1
 "%GH_EXE%" repo create Ramonzitooo/fintrack --public --source=. --remote=origin --push
 if %ERRORLEVEL% NEQ 0 (
     echo Repositório já existente. Configurando remote e enviando branch main...
     git remote add origin https://github.com/Ramonzitooo/fintrack.git >nul 2>&1
     git push -u origin main
+    if %ERRORLEVEL% NEQ 0 (
+        echo.
+        echo [ERRO] Falha ao enviar código para o GitHub ^(git push^).
+        pause
+        exit /b 1
+    )
 )
 
 echo.
-echo ========================================================
+echo [4/4] ========================================================
 echo   SUCESSO! SEU APP ESTÁ PUBLICADO EM:
 echo   https://github.com/Ramonzitooo/fintrack
 echo ========================================================

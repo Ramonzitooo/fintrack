@@ -17,7 +17,7 @@
 | Recurso | Descrição | Link Direto |
 | :--- | :--- | :--- |
 | **Aplicação Web (GitHub Pages)** | Acesse direto no navegador sem instalar nada | [Abrir FinTrack Online](https://ramonzitooo.github.io/fintrack/) |
-| **Download Direto — App Standalone (`app.html`)** | Bundle React 19 completo em **1 único arquivo HTML** autocontido (abra offline no navegador) | [Download fintrack-standalone.html](https://github.com/Ramonzitooo/fintrack/releases/latest/download/fintrack-standalone.html) |
+| **Download Direto — App Standalone (`app.html`)** | Bundle React 19 completo em **1 único arquivo HTML** autocontido com Cofre AES-256-GCM e zero fontes externas (abra offline no navegador) | [Download fintrack-standalone.html](https://github.com/Ramonzitooo/fintrack/releases/latest/download/fintrack-standalone.html) |
 | **Download Direto — Versão Clássica Zero-Knowledge (`public/app.html`)** | Monólito v3.4 com cofre criptográfico AES-GCM 256-bit (PBKDF2 600k iterações) | [Download fintrack-legacy-vault.html](https://github.com/Ramonzitooo/fintrack/releases/latest/download/fintrack-legacy-vault.html) |
 | **Todas as Versões & Pacotes** | Pacote ZIP completo para uso local e histórico de releases | [Ver Releases no GitHub](https://github.com/Ramonzitooo/fintrack/releases) |
 
@@ -33,38 +33,41 @@ O **FinTrack** organiza sua vida financeira em **6 abas operacionais**, uma cent
 - **Distribuição Empilhada & Bússola FIRE**: Acompanhamento visual de liquidez livre vs. reservas custodiadas vs. contas pendentes.
 
 ### 2. 🏦 Bancos & Custódia de Liquidez
-- **Gestão Multi-Contas**: Contas digitais, correntes, investimentos e dinheiro físico, com controle de remuneração em **% do CDI** (conversão composta exata $(1+i)^{1/12}-1$ com desconto regressivo de IR).
+- **Gestão Multi-Contas (CRUD Inline)**: Contas digitais, correntes, investimentos e dinheiro físico, com edição inline de instituição, modalidade, saldo e remuneração em **% do CDI** (conversão composta exata $(1+i)^{1/12}-1$ com desconto regressivo de IR).
 - **Transferências Internas (Pix)** e edição instantânea de saldos com suporte a desfazer (`Undo`).
 
 ### 3. 🎯 Caixinhas, Metas & Planejamento FIRE
-- **Potes Segregados**: Reserva de Emergência, metas de viagem/objetivos e **Independência Financeira (FIRE)** com cálculo logarítmico de prazo acelerado por juros compostos.
+- **Potes Segregados (CRUD Inline)**: Reserva de Emergência, metas de viagem/objetivos e **Independência Financeira (FIRE)** com edição inline de meta/aporte e cálculo logarítmico de prazo acelerado por juros compostos.
 - **Aportes & Resgates Simétricos**: Transferências diretas entre conta bancária e caixinha com atualização imediata de liquidez.
 
 ### 4. 💼 Contracheque CLT & Calculadora Anti-Impulso
 - **Folha de Pagamento Editável**: Proventos, descontos, histórico mensal de holerites e distribuição direta do salário líquido para conta + caixinhas.
-- **Cálculo Oficial Automático (1 Clique)**: Tabela progressiva oficial de **INSS e IRRF** com suporte a dependentes (`calculateOfficialPayrollTaxes`).
+- **Cálculo Oficial Automático 2026 (1 Clique)**: Tabelas progressivas oficiais de **INSS e IRRF 2026 (Lei 15.270/2025)** com suporte a dependentes (`calculateOfficialPayrollTaxes`).
 - **Calculadora Anti-Impulso ("Horas de Vida")**: Converte o preço de qualquer compra em horas/dias reais de trabalho líquido antes de decidir gastar.
 
 ### 5. 💳 Cartões de Crédito & Simulador À Vista vs. Parcelado
-- **Melhor Cartão Hoje**: Calcula dinamicamente os dias reais de fôlego entre data de corte e vencimento.
+- **Melhor Cartão Hoje & CRUD Inline**: Cadastro e edição inline de cartões (corte, vencimento, limite), calculando dinamicamente os dias reais de fôlego entre fechamento e vencimento.
 - **Simulador Matemático À Vista vs. Parcelado + CDI**: Compara o desconto à vista contra manter o valor investido a % do CDI enquanto quita as parcelas.
 
 ### 6. 🧾 Despesas, Envelopes Vivos & Quitador de Dívidas
-- **Molde de Contas Recorrentes**: Clona despesas fixas automaticamente a cada mudança de competência mensal, com quitação e estorno contábil simétrico.
+- **Molde de Contas Recorrentes, Parcelas Multi-Mês & CRUD Inline**: Clona despesas fixas automaticamente por competência, suporta **parcelamento multi-mês (1x a 48x)** distribuído automaticamente nas competências futuras, edição inline de lançamentos e quitação/estorno contábil simétrico.
+- **Receitas Avulsas**: Controle mensal de entradas extras (freelances, bônus, reembolsos) com marcação de recebimento e reconciliação no fluxo de caixa.
 - **Envelopes de Rotina**: Controle semanal/quinzenal/FDS para Supermercado, Lazer e Transporte conectado aos lançamentos reais do mês.
-- **Planejador de Quitação de Dívidas**: Estratégias *Avalanche* (maior taxa de juros) e *Bola de Neve* (menor saldo).
+- **Simulador de Quitação de Dívidas (*Avalanche* vs. *Bola de Neve*)**: Compara matematicamente *Avalanche* (maior taxa de juros) contra *Bola de Neve* (menor saldo), exibindo prazo total, ordem de quitação e economia de juros.
 - **Command Palette (`Ctrl + K`)**: Lançamento rápido por linguagem natural (ex.: `"almoço 45,90 pix"`).
 
 ### 7. 🔒 Privacidade & Blindagem Zero-Knowledge
+- **Cofre Zero-Knowledge AES-256-GCM (Ativo na v4 React)**: Cifragem em repouso no `localStorage` via WebCrypto API (PBKDF2-HMAC-SHA256 com 600.000 iterações, chaves `extractable: false`, Recovery Key de 120 bits e auto-lock por inatividade), com exportação/importação `.vault` interoperável com a versão v3.4 (`public/app.html`).
+- **PWA Offline-First Blindado**: Instalável offline via Service Worker + Manifesto, protegido por **Content Security Policy (CSP)** estrita e **zero fontes externas** (sem requisições a CDNs externos).
 - **Modo Privacidade (atalho `P`)**: Borra todos os valores monetários com desfoque óptico (`Quick-Peek` ao passar o mouse).
-- **Backups Seguros**: Exportação/importação `.json` e `.csv` com proteção contra **Prototype Pollution** e **CSV Formula Injection (CWE-1236)**, além de cofre cifrado **AES-GCM 256-bit** na edição standalone clássica (`public/app.html`).
+- **Backups Seguros**: Exportação/importação `.json`, `.csv` e `.vault` com proteção contra **Prototype Pollution** e **CSV Formula Injection (CWE-1236)**.
 
 ---
 
 ## System Overview
 
-O **FinTrack** é uma aplicação de planejamento financeiro e gestão patrimonial construída sob arquitetura *Zero-Knowledge* e *Offline-First*. Opera em duas frentes sincronizadas:
-1. **Aplicação Modular (v4.0 — React 19 + TypeScript + Vite 8 + Tailwind CSS v4):** Orquestrada em `./src/README.md` com componentes reativos, física fluida inspirada no Apple HIG / Material Design 3 e matemática financeira determinística.
+O **FinTrack** é uma aplicação de planejamento financeiro e gestão patrimonial construída sob arquitetura *Zero-Knowledge* e *PWA Offline-First* (CSP estrita + zero fontes externas). Opera em duas frentes sincronizadas:
+1. **Aplicação Modular (v4.0 — React 19 + TypeScript + Vite 8 + Tailwind CSS v4):** Orquestrada em `./src/README.md` com componentes reativos, Cofre Zero-Knowledge AES-256-GCM interoperável com `.vault` v3.4, física fluida inspirada no Apple HIG / Material Design 3 e matemática financeira determinística.
 2. **Aplicação Monolítica Standalone (v3.4 / Bundle Autocontido):** Preservada em `./public/app.html`, além do artefato compilado `./app.html` gerado por `./scripts/README.md`.
 
 ---
@@ -81,7 +84,7 @@ O **FinTrack** é uma aplicação de planejamento financeiro e gestão patrimoni
 
 - **Aplicação React (`src`)**: [`./src/README.md`](./src/README.md) — Orquestrador central (`App.tsx`), roteamento acessível entre 6 abas canônicas, atalhos globais de teclado e sincronização de estado.
   - **Componentes de Interface (`src/components`)**: [`./src/components/README.md`](./src/components/README.md) — Views modulares das abas financeiras (`OverviewTab`, `BanksTab`, `GoalsTab`, `PayrollTab`, `CardsTab`, `ExpensesTab`), diagnóstico técnico (`AuditDiagnosticView`) e os 15 modais interativos (`AppModals`).
-  - **Utilitários & Matemática (`src/utils`)**: [`./src/utils/README.md`](./src/utils/README.md) — Motor determinístico de matemática financeira (`financeMath.ts`), física de gestos e camada de persistência blindada (`storage.ts`).
+  - **Utilitários, Criptografia & Matemática (`src/utils`)**: [`./src/utils/README.md`](./src/utils/README.md) — Motor determinístico de matemática financeira (`financeMath.ts`), Cofre Zero-Knowledge AES-256-GCM (`cryptoVault.ts`), física de gestos e camada de persistência blindada (`storage.ts`).
 - **Scripts de Empacotamento (`scripts`)**: [`./scripts/README.md`](./scripts/README.md) — Compilador pós-build (`build-standalone.js`) que embute CSS e JS do Vite em um único arquivo HTML autocontido (`./app.html` e `dist/standalone.html`).
 
 ---
@@ -105,8 +108,8 @@ O **FinTrack** é uma aplicação de planejamento financeiro e gestão patrimoni
 
 ## System Verification
 
-- Run: `npm test`
-- Typecheck: `npm run lint`
+- Run: `npm test` (37 testes unitários TS: 28 `financeMath` + 9 `cryptoVault`)
+- Typecheck: `npm run lint` (`tsc --noEmit` em modo `strict`)
 - Build & Standalone Bundle: `npm run build`
 - Legacy & Integration Suite:
   ```bash
@@ -131,7 +134,7 @@ npm run dev
 # 3. Verificação de tipos TypeScript
 npm run lint
 
-# 4. Executar testes unitários de matemática financeira
+# 4. Executar os 37 testes unitários TS (28 financeMath + 9 cryptoVault)
 npm test
 
 # 5. Build de produção e geração do standalone (saída em dist/ e ./app.html)

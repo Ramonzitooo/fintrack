@@ -3,6 +3,8 @@ name: Deploy FinTrack to GitHub Pages
 on:
   push:
     branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
   workflow_dispatch:
 
 permissions:
@@ -25,13 +27,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run lint
 
       - name: Run unit and security tests
         run: |
-          npx tsx src/utils/financeMath.test.ts
+          npm test
           node tests/audit.js
           node tests/backup_structure.test.js
           node tests/financial_math.test.js
@@ -39,12 +45,16 @@ jobs:
       - name: Build production bundle
         run: npm run build
 
+      - name: Verify built theme CSS
+        run: node tests/verify_theme_css.test.js
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ./dist
 
   deploy:
+    if: github.event_name == 'push'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
