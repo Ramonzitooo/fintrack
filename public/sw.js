@@ -5,6 +5,18 @@ const PRECACHE_URLS = [
   './manifest.webmanifest',
   './icon.svg',
 ];
+const LOCAL_API_BYPASS_PREFIXES = ['/health', '/actuator', '/danfse'];
+
+function isLocalApiBypassPath(pathname) {
+  const normalized = pathname.toLowerCase();
+  return LOCAL_API_BYPASS_PREFIXES.some(
+    (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`)
+  );
+}
+
+function createOfflineResponse() {
+  return new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -46,6 +58,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  if (isLocalApiBypassPath(requestUrl.pathname)) {
+    return;
+  }
+
   if (event.request.mode === 'navigate') {
     event.respondWith(
       fetch(event.request)
@@ -59,7 +75,9 @@ self.addEventListener('fetch', (event) => {
         .catch(() =>
           caches
             .match(event.request)
-            .then((cached) => cached || caches.match('./index.html') || caches.match('./'))
+            .then((cached) => cached || caches.match('./index.html'))
+            .then((cached) => cached || caches.match('./'))
+            .then((cached) => cached || createOfflineResponse())
         )
     );
     return;
@@ -75,7 +93,7 @@ self.addEventListener('fetch', (event) => {
           }
           return networkResponse;
         })
-        .catch(() => cachedResponse);
+        .catch(() => cachedResponse || createOfflineResponse());
 
       return cachedResponse || fetchPromise;
     })

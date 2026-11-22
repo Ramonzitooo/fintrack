@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   AUTO_LOCK_OPTIONS,
   VAULT_ITERATIONS,
+  MIN_KDF_ITERATIONS,
+  MAX_KDF_ITERATIONS,
   deriveVaultKey,
   generateRecoveryKey,
   normalizeRecoveryKey,
@@ -10,9 +12,13 @@ import {
   evaluatePasswordStrength,
   encryptVaultPayload,
   decryptVaultPayload,
+  createVaultSession,
+  unlockVaultWithSession,
+  encryptWithVaultSession,
   isEncryptedVaultEnvelope,
   saveVaultSessionConfig,
   loadVaultSessionConfig,
+  type VaultEnvelope,
   type LegacyVaultEnvelopeV34,
 } from './cryptoVault.ts';
 import { DEFAULT_STATE, type AppState } from './storage.ts';
@@ -233,4 +239,282 @@ test('AUTO_LOCK_OPTIONS and saveVaultSessionConfig handle non-sensitive session 
 
   const loadedFallback = loadVaultSessionConfig();
   assert.equal(typeof loadedFallback.autoLockMin, 'number');
+});
+
+test('CRÍTICO-01: unlock via Recovery Key (lowercase/no hyphens), re-save with encryptWithVaultSession, and unlock via Master Password and canonical Recovery Key', async () => {
+  // Arrange
+  const state1 = buildSampleAppState();
+  const masterPassword = 'SenhaMestraOriginal#2026';
+  const recoveryKey = generateRecoveryKey();
+  const unformattedRecovery = normalizeRecoveryKey(recoveryKey).toLowerCase();
+
+  const { envelope: env1, session: initialSession } = await createVaultSession(
+    state1,
+    masterPassword,
+    recoveryKey
+  );
+  assert.equal(initialSession.vaultKey.extractable, false);
+
+  // Act — desbloqueia com Recovery Key em minúsculas e sem hífens
+  const unlockedViaRec = await unlockVaultWithSession<AppState>(env1, unformattedRecovery);
+  assert.equal(unlockedViaRec.unlockedViaRecovery, true);
+  assert.equal(unlockedViaRec.migratedFromLegacy, false);
+  assert.equal(unlockedViaRec.session.vaultKey.extractable, false);
+  assert.deepEqual(unlockedViaRec.data, state1);
+
+  // Salva alteração usando apenas a sessão (CryptoKey inextratível)
+  const state2: AppState = {
+    ...state1,
+    bancos: [{ ...state1.bancos[0], saldo: 9876.54 }],
+  };
+  const env2 = await encryptWithVaultSession(state2, unlockedViaRec.session);
+
+  // Assert — novo envelope mantém salt/recoveryWrapped e gera IV novo
+  assert.notEqual(env2.iv, env1.iv);
+  assert.equal(env2.salt, env1.salt);
+  assert.ok(env2.recoveryWrapped);
+
+  // Deve desbloquear com a Senha Mestra original (prova de que CRÍTICO-01 foi eliminado)
+  const unlockedWithPwd = await unlockVaultWithSession<AppState>(env2, masterPassword);
+  assert.equal(unlockedWithPwd.unlockedViaRecovery, false);
+  assert.equal(unlockedWithPwd.migratedFromLegacy, false);
+  assert.deepEqual(unlockedWithPwd.data, state2);
+
+  // Deve continuar desbloqueando com a Recovery Key canônica
+  const unlockedWithCanonicalRec = await unlockVaultWithSession<AppState>(env2, recoveryKey);
+  assert.equal(unlockedWithCanonicalRec.unlockedViaRecovery, true);
+  assert.equal(unlockedWithCanonicalRec.migratedFromLegacy, false);
+  assert.deepEqual(unlockedWithCanonicalRec.data, state2);
+});
+
+test('Legacy v3.4: unlock via Recovery Key migrates to v4.0 preserving unlock by Master Password and Recovery Key', async () => {
+  // Arrange — constrói um envelope legado v3.4 completo com recoveryEnvelope
+  const legacyPassword = 'v34LegacyPassword#2026';
+  const recoveryKey = generateRecoveryKey();
+  const normRecovery = normalizeRecoveryKey(recoveryKey);
+  const cifraSalt = crypto.getRandomValues(new Uint8Array(16));
+  const recoveryKeySalt = crypto.getRandomValues(new Uint8Array(16));
+  const state1 = buildSampleAppState();
+
+  const legacyVaultKey = await deriveVaultKey(legacyPassword, cifraSalt, VAULT_ITERATIONS);
+  const dataIv = crypto.getRandomValues(new Uint8Array(12));
+  const dataCt = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: dataIv },
+      legacyVaultKey,
+      new TextEncoder().encode(JSON.stringify(state1))
+    )
+  );
+
+  const recKey = await deriveVaultKey(normRecovery, recoveryKeySalt, VAULT_ITERATIONS);
+  const recIv = crypto.getRandomValues(new Uint8Array(12));
+  const recCt = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: recIv },
+      recKey,
+      new TextEncoder().encode(legacyPassword)
+    )
+  );
+
+  const toB64 = (u8: Uint8Array) => {
+    let s = '';
+    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return btoa(s);
+  };
+
+  const legacyEnvelope: LegacyVaultEnvelopeV34 = {
+    __vault: true,
+    version: '3.4',
+    lastUpdated: '2026-11-21T00:00:00.000Z',
+    seguranca: {
+      enabled: true,
+      cifrar: true,
+      autoLockMin: 15,
+      kdfAlgo: 'pbkdf2',
+      kdfIters: VAULT_ITERATIONS,
+      cifraSalt: toB64(cifraSalt),
+      recoveryKeySalt: toB64(recoveryKeySalt),
+      recoveryEnvelope: toB64(recCt),
+      recoveryEnvelopeIv: toB64(recIv),
+    },
+    iv: toB64(dataIv),
+    ciphertext: toB64(dataCt),
+  };
+
+  // Act — desbloqueia v3.4 via Recovery Key em minúsculas sem hífens
+  const migrated = await unlockVaultWithSession<AppState>(
+    legacyEnvelope,
+    normRecovery.toLowerCase()
+  );
+
+  // Assert — sessão migrada usa novo salt, CryptoKey inextratível e re-embrulha masterPassword
+  assert.equal(migrated.unlockedViaRecovery, true);
+  assert.equal(migrated.migratedFromLegacy, true);
+  assert.equal(migrated.session.vaultKey.extractable, false);
+  assert.notEqual(migrated.session.salt, legacyEnvelope.seguranca.cifraSalt);
+  assert.ok(migrated.session.recoveryWrapped);
+  assert.deepEqual(migrated.data, state1);
+
+  const state2: AppState = {
+    ...state1,
+    bancos: [{ ...state1.bancos[0], saldo: 12345.67 }],
+  };
+  const v4Envelope = await encryptWithVaultSession(state2, migrated.session);
+  assert.equal(v4Envelope.version, '4.0');
+
+  // Re-desbloqueio do envelope migrado pela Senha Mestra original
+  const reopenedByPwd = await unlockVaultWithSession<AppState>(v4Envelope, legacyPassword);
+  assert.equal(reopenedByPwd.migratedFromLegacy, false);
+  assert.equal(reopenedByPwd.unlockedViaRecovery, false);
+  assert.deepEqual(reopenedByPwd.data, state2);
+
+  // Re-desbloqueio do envelope migrado pela Recovery Key canônica
+  const reopenedByRec = await unlockVaultWithSession<AppState>(v4Envelope, recoveryKey);
+  assert.equal(reopenedByRec.migratedFromLegacy, false);
+  assert.equal(reopenedByRec.unlockedViaRecovery, true);
+  assert.deepEqual(reopenedByRec.data, state2);
+
+  // Também garante migração via Senha Mestra preservando recoveryWrapped legado
+  const migratedByPwd = await unlockVaultWithSession<AppState>(legacyEnvelope, legacyPassword);
+  assert.equal(migratedByPwd.migratedFromLegacy, true);
+  assert.equal(migratedByPwd.unlockedViaRecovery, false);
+  const v4FromPwd = await encryptWithVaultSession(state2, migratedByPwd.session);
+  assert.deepEqual(await decryptVaultPayload<AppState>(v4FromPwd, legacyPassword), state2);
+  assert.deepEqual(await decryptVaultPayload<AppState>(v4FromPwd, recoveryKey), state2);
+});
+
+test('MÉDIO-02: rejects KDF iterations outside [MIN_KDF_ITERATIONS, MAX_KDF_ITERATIONS] in v4.0, recoveryWrapped, v3.4 and deriveVaultKey', async () => {
+  assert.equal(MIN_KDF_ITERATIONS, 100_000);
+  assert.equal(MAX_KDF_ITERATIONS, 2_000_000);
+
+  const state = buildSampleAppState();
+  const password = 'SenhaValida#2026';
+  const recoveryKey = generateRecoveryKey();
+  const validEnv = await encryptVaultPayload(state, password, recoveryKey);
+
+  // v4.0 abaixo do mínimo (1000) e acima do máximo (2_000_000_000 -> bloqueio anti-DoS)
+  const lowIterEnv: VaultEnvelope = { ...validEnv, iterations: 1000 };
+  const dosIterEnv: VaultEnvelope = { ...validEnv, iterations: 2_000_000_000 };
+  const zeroIterEnv: VaultEnvelope = { ...validEnv, iterations: 0 };
+  const floatIterEnv: VaultEnvelope = { ...validEnv, iterations: 100_000.5 };
+  const dosRecIterEnv: VaultEnvelope = {
+    ...validEnv,
+    recoveryWrapped: { ...validEnv.recoveryWrapped!, iterations: 2_000_000_000 },
+  };
+
+  await assert.rejects(() => decryptVaultPayload(lowIterEnv, password), /iterações/i);
+  await assert.rejects(() => decryptVaultPayload(dosIterEnv, password), /iterações/i);
+  await assert.rejects(() => unlockVaultWithSession(lowIterEnv, password), /iterações/i);
+  await assert.rejects(() => unlockVaultWithSession(dosIterEnv, password), /iterações/i);
+  await assert.rejects(() => unlockVaultWithSession(zeroIterEnv, password), /iterações/i);
+  await assert.rejects(() => unlockVaultWithSession(floatIterEnv, password), /iterações/i);
+  await assert.rejects(() => unlockVaultWithSession(dosRecIterEnv, password), /iterações/i);
+
+  // Legado v3.4 fora do intervalo permitido
+  const legacyBase: LegacyVaultEnvelopeV34 = {
+    __vault: true,
+    version: '3.4',
+    seguranca: {
+      cifraSalt: validEnv.salt,
+      kdfIters: 1000,
+    },
+    iv: validEnv.iv,
+    ciphertext: validEnv.ciphertext,
+  };
+  await assert.rejects(() => decryptVaultPayload(legacyBase, password), /iterações/i);
+  await assert.rejects(
+    () =>
+      unlockVaultWithSession(
+        { ...legacyBase, seguranca: { ...legacyBase.seguranca, kdfIters: 2_000_000_000 } },
+        password
+      ),
+    /iterações/i
+  );
+
+  // deriveVaultKey direto fora do intervalo
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  await assert.rejects(() => deriveVaultKey(password, salt, 1000), /iterações/i);
+  await assert.rejects(() => deriveVaultKey(password, salt, 2_000_000_000), /iterações/i);
+});
+
+test('recoveryWrapped uses fixed-size padding (no password length leak) and remains backward-compatible with legacy unpadded envelopes', async () => {
+  const state = buildSampleAppState();
+  const recoveryKey = generateRecoveryKey();
+  const shortPwd = 'Abcd1234'; // 8 chars
+  const longPwd = 'SenhaMestraSuperExtensaComQuarentaChars!'; // 40 chars
+  assert.equal(shortPwd.length, 8);
+  assert.equal(longPwd.length, 40);
+
+  const envShort = await encryptVaultPayload(state, shortPwd, recoveryKey);
+  const envLong = await encryptVaultPayload(state, longPwd, recoveryKey);
+
+  assert.ok(envShort.recoveryWrapped);
+  assert.ok(envLong.recoveryWrapped);
+  // Comprimento exato do ciphertext de recoveryWrapped deve ser idêntico para 8 e 40 chars
+  assert.equal(
+    envShort.recoveryWrapped.ciphertext.length,
+    envLong.recoveryWrapped.ciphertext.length
+  );
+
+  // Ambos desbloqueiam corretamente via Recovery Key e via Senha Mestra
+  assert.deepEqual(await decryptVaultPayload<AppState>(envShort, recoveryKey), state);
+  assert.deepEqual(await decryptVaultPayload<AppState>(envLong, recoveryKey), state);
+  assert.deepEqual(await decryptVaultPayload<AppState>(envShort, shortPwd), state);
+  assert.deepEqual(await decryptVaultPayload<AppState>(envLong, longPwd), state);
+
+  // Retrocompatibilidade com envelope v4.0 antigo cujo recoveryWrapped não tinha padding
+  const legacyUnpaddedPwd = 'SenhaLegadoSemPad#26';
+  const envWithOldRec = await encryptVaultPayload(state, legacyUnpaddedPwd);
+  const recSalt = crypto.getRandomValues(new Uint8Array(16));
+  const recIv = crypto.getRandomValues(new Uint8Array(12));
+  const recKey = await deriveVaultKey(normalizeRecoveryKey(recoveryKey), recSalt, VAULT_ITERATIONS);
+  const unpaddedCt = new Uint8Array(
+    await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: recIv },
+      recKey,
+      new TextEncoder().encode(legacyUnpaddedPwd)
+    )
+  );
+  const toB64 = (u8: Uint8Array) => {
+    let s = '';
+    for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+    return btoa(s);
+  };
+  envWithOldRec.recoveryWrapped = {
+    kdf: 'PBKDF2-SHA256',
+    iterations: VAULT_ITERATIONS,
+    salt: toB64(recSalt),
+    iv: toB64(recIv),
+    ciphertext: toB64(unpaddedCt),
+  };
+
+  const unlockedOld = await unlockVaultWithSession<AppState>(envWithOldRec, recoveryKey);
+  assert.equal(unlockedOld.unlockedViaRecovery, true);
+  assert.deepEqual(unlockedOld.data, state);
+});
+
+test('VaultSession guarantees non-extractable CryptoKey and distinct CSPRNG IV on every encryptWithVaultSession call', async () => {
+  const state = buildSampleAppState();
+  const password = 'SessaoSegura#2026';
+  const recoveryKey = generateRecoveryKey();
+
+  const { envelope: envInitial, session } = await createVaultSession(state, password, recoveryKey);
+
+  // Chave deve ser estritamente inextratível
+  assert.equal(session.vaultKey.extractable, false);
+  await assert.rejects(() => crypto.subtle.exportKey('raw', session.vaultKey));
+
+  // Chamadas consecutivas devem gerar IVs distintos e ciphertexts distintos
+  const envA = await encryptWithVaultSession(state, session);
+  const envB = await encryptWithVaultSession(state, session);
+
+  assert.notEqual(envA.iv, envInitial.iv);
+  assert.notEqual(envB.iv, envInitial.iv);
+  assert.notEqual(envA.iv, envB.iv);
+  assert.notEqual(envA.ciphertext, envB.ciphertext);
+  assert.equal(envA.salt, session.salt);
+  assert.equal(envB.salt, session.salt);
+
+  assert.deepEqual(await decryptVaultPayload<AppState>(envA, password), state);
+  assert.deepEqual(await decryptVaultPayload<AppState>(envB, password), state);
 });

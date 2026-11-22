@@ -330,7 +330,7 @@ export const PayrollTab: React.FC<PayrollTabProps> = ({
               step="10"
               value={antiImpulsoPreco}
               onChange={(e) => setAntiImpulsoPreco(Math.max(0, parseFloat(e.target.value) || 0))}
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3.5 py-2.5 text-sm font-mono tabular-nums text-slate-900 dark:text-white"
+              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3.5 py-2.5 text-sm font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
             />
           </div>
           <div>
@@ -647,7 +647,7 @@ export const CardsTab: React.FC<CardsTabProps> = ({
                             setEditCardLimit(e.target.value);
                             if (editCardError) setEditCardError(null);
                           }}
-                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
                         />
                       </div>
 
@@ -807,7 +807,7 @@ export const CardsTab: React.FC<CardsTabProps> = ({
               step="50"
               value={simValor}
               onChange={(e) => setSimValor(Math.max(0, parseFloat(e.target.value) || 0))}
-              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-white"
+              className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
             />
           </div>
 

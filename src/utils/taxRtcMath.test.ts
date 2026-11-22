@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
 import {
   RTC_TRANSITION_SCHEDULE,
   RTC_REDUCTION_PRESETS,
@@ -8,11 +10,20 @@ import {
   getRtcScheduleForYear,
   calculateRegimeRegularRtc,
   calculateSimplesNacionalRtc,
+  hasForbiddenXmlConstructs,
+  stripXmlCommentsLinear,
+  stripScriptBlocksLinear,
+  hasValidElementPairLinear,
+  extractXmlBlock,
+  sanitizeNfseXmlForLocalService,
   parseNfseXml,
 } from './taxRtcMath.ts';
 import {
   DEFAULT_LOCAL_RTC_ENDPOINTS,
+  MAX_DANFSE_PDF_BYTES,
+  MIN_LOCAL_RTC_PORT,
   isAllowedLocalRtcUrl,
+  isPdfMagicBytes,
   checkLocalRtcHealth,
   generateOfficialDanfsePdfLocal,
 } from './taxRtcClient.ts';
@@ -282,7 +293,8 @@ test('7. parseNfseXml parses NFS-e Padrão Nacional (with namespaces & entities)
     assert.equal(parsedNac.data.prestadorCnpj, '12345678000199');
     assert.equal(parsedNac.data.tomadorNome, 'Cliente "Alpha" S/A');
     assert.equal(parsedNac.data.tomadorDocumento, '98765432000111');
-    assert.equal(parsedNac.data.discriminacao, 'Consultoria <TI> & Arquitetura');
+    // Caracteres '<' e '>' decodificados de &lt;/&gt; são removidos pós-decodificação para evitar injeção de tags
+    assert.equal(parsedNac.data.discriminacao, 'Consultoria TI & Arquitetura');
     assert.equal(parsedNac.data.codigoServico, '010701');
     assert.equal(parsedNac.data.valorServicos, 10000);
     assert.equal(parsedNac.data.valorIss, 500);
@@ -393,4 +405,440 @@ test('10. storage normalizeState preserves Impostos expense category', () => {
     },
   });
   assert.equal(norm.despesasPorMes['2026-11'][0].categoria, 'Impostos');
+});
+
+test('11. Anti-ReDoS O(N): parseNfseXml and linear XML helpers process adversarial unclosed payloads in < 150ms', () => {
+  // Payload malicioso com 150.000 tags abertas sem fechamento (~450 KB)
+  const unclosedTagsPayload = '<a>'.repeat(150_000);
+  const t0 = performance.now();
+  const parsedUnclosed = parseNfseXml(unclosedTagsPayload);
+  const elapsedUnclosed = performance.now() - t0;
+  assert.equal(parsedUnclosed.ok, false);
+  assert.ok(
+    elapsedUnclosed < 150,
+    `Esperado tempo linear < 150ms para 150k tags abertas, obteve ${elapsedUnclosed.toFixed(1)}ms`
+  );
+
+  // Comentários, scripts e blocos de tag sem fechamento também devem executar em tempo linear
+  const unclosedComments = '<NFSe>' + '<!--'.repeat(100_000) + '</NFSe>';
+  const unclosedScripts = '<NFSe>' + '<script>'.repeat(100_000) + '</NFSe>';
+  const unclosedEmits = '<NFSe>' + '<emit>'.repeat(100_000) + '</NFSe>';
+
+  const t1 = performance.now();
+  assert.equal(parseNfseXml(unclosedComments).ok, false);
+  assert.equal(parseNfseXml(unclosedScripts).ok, false);
+  assert.equal(parseNfseXml(unclosedEmits).ok, true);
+  assert.equal(extractXmlBlock('<emit>'.repeat(150_000), 'emit'), null);
+  assert.equal(hasValidElementPairLinear(unclosedTagsPayload), false);
+  const elapsedExtra = performance.now() - t1;
+  assert.ok(
+    elapsedExtra < 250,
+    `Esperado tempo linear agregado < 250ms, obteve ${elapsedExtra.toFixed(1)}ms`
+  );
+
+  // Checagem rápida pré-TextEncoder rejeita string acima de MAX_NFSE_XML_BYTES instantaneamente
+  const oversized = 'A'.repeat(MAX_NFSE_XML_BYTES + 1);
+  const t2 = performance.now();
+  assert.equal(parseNfseXml(oversized).ok, false);
+  assert.equal(sanitizeNfseXmlForLocalService(oversized).ok, false);
+  assert.ok(performance.now() - t2 < 50);
+});
+
+test('12. Preservação de <![CDATA[...]]> em parseNfseXml (ABRASF e blocos mistos)', () => {
+  const xmlAbrasfCdata = `<?xml version="1.0" encoding="UTF-8"?>
+    <CompNfse>
+      <Nfse>
+        <InfNfse>
+          <Numero>7712</Numero>
+          <PrestadorServico>
+            <RazaoSocial><![CDATA[Alpha & Ômega Consultoria]]></RazaoSocial>
+            <Cnpj>11222333000144</Cnpj>
+          </PrestadorServico>
+          <Servico>
+            <Discriminacao><![CDATA[Consultoria TI — Projeto Alpha & Beta]]></Discriminacao>
+            <Valores>
+              <ValorServicos>5000.00</ValorServicos>
+              <ValorIss>250.00</ValorIss>
+              <ValorLiquidoNfse>5000.00</ValorLiquidoNfse>
+            </Valores>
+          </Servico>
+        </InfNfse>
+      </Nfse>
+    </CompNfse>`;
+
+  const parsed = parseNfseXml(xmlAbrasfCdata);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) {
+    assert.equal(parsed.data.formato, 'abrasf');
+    assert.equal(parsed.data.numero, '7712');
+    assert.equal(parsed.data.prestadorNome, 'Alpha & Ômega Consultoria');
+    assert.equal(parsed.data.discriminacao, 'Consultoria TI — Projeto Alpha & Beta');
+    assert.equal(parsed.data.valorServicos, 5000);
+  }
+
+  // CDATA misturado com subtags e conteúdo malicioso embutido dentro de CDATA
+  const xmlMixed = `<CompNfse><InfNfse><Numero>88</Numero><Discriminacao><obs>Serviço:</obs> <![CDATA[Auditoria <script>alert(1)</script> & Compliance\u202e]]></Discriminacao></InfNfse></CompNfse>`;
+  const parsedMixed = parseNfseXml(xmlMixed);
+  assert.equal(parsedMixed.ok, true);
+  if (parsedMixed.ok) {
+    assert.equal(parsedMixed.data.discriminacao, 'Serviço: Auditoria & Compliance');
+    assert.ok(!parsedMixed.data.discriminacao.includes('<script'));
+    assert.ok(!parsedMixed.data.discriminacao.includes('\u202e'));
+  }
+});
+
+test('13. Anti-bypass via entidades XML, surrogates UTF-16, controles C0/C1 e Unicode Bidi overrides', () => {
+  const xmlAdversarial = `<?xml version="1.0" encoding="UTF-8"?>
+    <NFSe>
+      <infNFSe>
+        <nNFSe>&#x202e;9999</nNFSe>
+        <emit>
+          <xNome>Empresa&#xD800;&#x00;&#x07;&#x85;&#x2066;&#x061c; &amp; Cia\u202e\u2069\u000b</xNome>
+          <CNPJ>12345678000199</CNPJ>
+        </emit>
+        <DPS>
+          <infDPS>
+            <toma>
+              <xNome>&#x3c;script&#x3e;alert(2)&#x3c;/script&#x3e;Cliente &#231;&#xE3;o</xNome>
+            </toma>
+            <serv>
+              <cServ>
+                <xDescServ>&lt;script&gt;alert(1)&lt;/script&gt;Consultoria &lt;img src=x onerror=alert(1)&gt;</xDescServ>
+              </cServ>
+            </serv>
+            <valores>
+              <vServPrest><vServ>1500.00</vServ></vServPrest>
+            </valores>
+          </infDPS>
+        </DPS>
+      </infNFSe>
+    </NFSe>`;
+
+  const parsed = parseNfseXml(xmlAdversarial);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) {
+    assert.equal(parsed.data.numero, '9999');
+    assert.ok(!parsed.data.numero.includes('\u202e'));
+
+    assert.equal(parsed.data.prestadorNome, 'Empresa & Cia');
+    assert.ok(!/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u061C\u202A-\u202E\u2066-\u2069\uD800-\uDFFF]/.test(parsed.data.prestadorNome));
+
+    assert.equal(parsed.data.tomadorNome, 'Cliente ção');
+    assert.ok(!parsed.data.tomadorNome.includes('<script'));
+    assert.ok(!parsed.data.tomadorNome.includes('alert(2)'));
+
+    assert.ok(!parsed.data.discriminacao.includes('<script>'));
+    assert.ok(!parsed.data.discriminacao.includes('</script>'));
+    assert.ok(!parsed.data.discriminacao.includes('<'));
+    assert.ok(!parsed.data.discriminacao.includes('>'));
+    assert.ok(parsed.data.discriminacao.startsWith('Consultoria'));
+  }
+});
+
+test('14. Bloqueio de xi:include, xml-stylesheet, ATTLIST, NOTATION e higienização via sanitizeNfseXmlForLocalService', () => {
+  const forbiddenPayloads = [
+    {
+      label: 'xi:include',
+      xml: '<NFSe xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///etc/passwd" parse="text"/><nNFSe>1</nNFSe></NFSe>',
+    },
+    {
+      label: 'include sem prefixo',
+      xml: '<NFSe><include href="http://127.0.0.1:8080/secret"/><nNFSe>1</nNFSe></NFSe>',
+    },
+    {
+      label: 'xml-stylesheet (XSLT)',
+      xml: '<?xml version="1.0"?><?xml-stylesheet type="text/xsl" href="http://evil.local/x.xsl"?><NFSe><nNFSe>1</nNFSe></NFSe>',
+    },
+    {
+      label: 'ATTLIST',
+      xml: '<!ATTLIST NFSe id ID #IMPLIED><NFSe><nNFSe>1</nNFSe></NFSe>',
+    },
+    {
+      label: 'NOTATION',
+      xml: '<!NOTATION gif SYSTEM "image/gif"><NFSe><nNFSe>1</nNFSe></NFSe>',
+    },
+    {
+      label: 'DOCTYPE',
+      xml: '<!DOCTYPE nfse SYSTEM "http://evil.local/dtd"><NFSe><nNFSe>1</nNFSe></NFSe>',
+    },
+    {
+      label: 'ENTITY',
+      xml: '<!ENTITY xxe SYSTEM "file:///etc/passwd"><NFSe><nNFSe>&xxe;</nNFSe></NFSe>',
+    },
+  ];
+
+  for (const item of forbiddenPayloads) {
+    assert.equal(hasForbiddenXmlConstructs(item.xml), true, `hasForbiddenXmlConstructs deve detectar ${item.label}`);
+    assert.equal(parseNfseXml(item.xml).ok, false, `parseNfseXml deve rejeitar ${item.label}`);
+    assert.equal(
+      sanitizeNfseXmlForLocalService(item.xml).ok,
+      false,
+      `sanitizeNfseXmlForLocalService deve rejeitar ${item.label}`
+    );
+  }
+
+  // Smuggling de DOCTYPE / xi:include fragmentado por comentário XML também é bloqueado
+  const splitSmuggle = '<!DOC<!--x-->TYPE foo><NFSe><nNFSe>1</nNFSe></NFSe>';
+  assert.equal(sanitizeNfseXmlForLocalService(splitSmuggle).ok, false);
+  assert.equal(parseNfseXml(splitSmuggle).ok, false);
+
+  // XML legítimo com comentários, <script> embutido e Unicode 'İ' (U+0130) é limpo sem corrupção de índices
+  const dirtyValid = `<?xml version="1.0" encoding="UTF-8"?>
+    <!-- comentário interno -->
+    <NFSe>
+      <nNFSe>202699</nNFSe>
+      <xDescServ>İstanbul serviços</xDescServ>
+      <SCRIPT type="text/javascript">alert(1)</SCRIPT>
+      <vServ>100.00</vServ>
+    </NFSe>`;
+  assert.equal(hasForbiddenXmlConstructs(dirtyValid), false);
+
+  const sanitized = sanitizeNfseXmlForLocalService(dirtyValid);
+  assert.equal(sanitized.ok, true);
+  if (sanitized.ok) {
+    assert.ok(!sanitized.xml.includes('<!--'));
+    assert.ok(!sanitized.xml.toLowerCase().includes('<script'));
+    assert.ok(sanitized.xml.includes('<nNFSe>202699</nNFSe>'));
+    assert.ok(sanitized.xml.includes('İstanbul serviços'));
+  }
+
+  // Helpers lineares individuais preservam tags semelhantes e removem comentários/scripts corretamente
+  assert.equal(stripXmlCommentsLinear('a<!--x-->b<!--unclosed'), 'ab');
+  assert.equal(
+    stripScriptBlocksLinear('<scripture>ok</scripture><script>evil()</script><svg:script/>end'),
+    '<scripture>ok</scripture>  end'
+  );
+});
+
+test('15. MÉDIO-03: isAllowedLocalRtcUrl enforces explicit non-privileged port and blocks query, hash, path traversal and external hosts', () => {
+  assert.equal(MAX_DANFSE_PDF_BYTES, 10 * 1024 * 1024);
+  assert.equal(MIN_LOCAL_RTC_PORT, 1024);
+
+  // Aceita endpoints locais válidos com porta explícita >= 1024
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080'), true);
+  assert.equal(isAllowedLocalRtcUrl('http://127.0.0.1:8082/danfse'), true);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:1024'), true);
+  assert.equal(isAllowedLocalRtcUrl('http://127.0.0.1:65535/api/v1'), true);
+
+  // Rejeita query strings e hashes (inclusive vazios)
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080?x=1'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080/danfse?x=1'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080/?'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080#a'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://127.0.0.1:8082/danfse#a'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080/#'), false);
+
+  // Rejeita path traversal (bruto, normalizado, percent-encoded e protocol-relative //)
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080/../etc'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080/api/../secret'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://127.0.0.1:8082/%2e%2e/etc'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://127.0.0.1:8082/%2E%2E/etc'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8080/..\\etc'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:8082//evil.com'), false);
+
+  // Rejeita portas privilegiadas (< 1024) e URLs sem porta explícita
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:80'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://127.0.0.1:80/danfse'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:22'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:443'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost:1023'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://127.0.0.1'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://localhost/danfse'), false);
+
+  // Rejeita hosts externos, protocolos diferentes de http e credenciais
+  assert.equal(isAllowedLocalRtcUrl('http://example.com:8080'), false);
+  assert.equal(isAllowedLocalRtcUrl('https://localhost:8080'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://user:pass@localhost:8080'), false);
+  assert.equal(isAllowedLocalRtcUrl('http://169.254.169.254:8080/latest'), false);
+});
+
+test('16. MÉDIO-03: isPdfMagicBytes validates %PDF- signature and rejects HTML or short buffers', () => {
+  const enc = new TextEncoder();
+
+  // Assinatura mágica válida %PDF-
+  assert.equal(isPdfMagicBytes(enc.encode('%PDF-1.7\n%binary')), true);
+  assert.equal(isPdfMagicBytes(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])), true);
+
+  // Rejeita HTML disfarçado, prefixos inválidos e buffers < 5 bytes
+  assert.equal(isPdfMagicBytes(enc.encode('<html><body>not a pdf</body></html>')), false);
+  assert.equal(isPdfMagicBytes(enc.encode('<!DOCTYPE html><html></html>')), false);
+  assert.equal(isPdfMagicBytes(enc.encode(' %PDF-1.7')), false);
+  assert.equal(isPdfMagicBytes(enc.encode('%PDF')), false);
+  assert.equal(isPdfMagicBytes(new Uint8Array([0x25, 0x50, 0x44, 0x46])), false);
+  assert.equal(isPdfMagicBytes(new Uint8Array(0)), false);
+});
+
+test('17. MÉDIO-03: generateOfficialDanfsePdfLocal and checkLocalRtcHealth enforce pre-fetch XML sanitization, redirect:error, size limit and PDF magic bytes', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  let lastUrl = '';
+  let lastInit: RequestInit | undefined;
+
+  try {
+    // 1. Rejeita XXE (<!DOCTYPE) e XInclude (<xi:include) ANTES de qualquer chamada de rede
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      throw new Error('fetch não deveria ter sido chamado para XML proibido');
+    }) as typeof fetch;
+
+    const doctypeRes = await generateOfficialDanfsePdfLocal(
+      'http://localhost:8082',
+      '<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><NFSe><nNFSe>&xxe;</nNFSe></NFSe>'
+    );
+    assert.equal(doctypeRes.ok, false);
+    assert.equal(fetchCalls, 0);
+
+    const xincludeRes = await generateOfficialDanfsePdfLocal(
+      'http://127.0.0.1:8082/danfse',
+      '<NFSe xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file:///etc/passwd"/><nNFSe>1</nNFSe></NFSe>'
+    );
+    assert.equal(xincludeRes.ok, false);
+    assert.equal(fetchCalls, 0);
+
+    // 2. checkLocalRtcHealth exige redirect: 'error'
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      lastUrl = String(input);
+      lastInit = init;
+      return new Response('OK', { status: 200 });
+    }) as typeof fetch;
+
+    const healthOk = await checkLocalRtcHealth('http://localhost:8080');
+    assert.equal(healthOk.online, true);
+    assert.equal(lastUrl, 'http://localhost:8080');
+    assert.equal(lastInit?.redirect, 'error');
+
+    // 3. generateOfficialDanfsePdfLocal monta /danfse via new URL, passa redirect:'error' e aceita PDF válido
+    const validXml = '<?xml version="1.0"?><NFSe><!-- comentario --><nNFSe>42</nNFSe></NFSe>';
+    const validPdfBytes = new TextEncoder().encode('%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF');
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      lastUrl = String(input);
+      lastInit = init;
+      return new Response(validPdfBytes, {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf' },
+      });
+    }) as typeof fetch;
+
+    const pdfOk = await generateOfficialDanfsePdfLocal('http://localhost:8082', validXml);
+    assert.equal(pdfOk.ok, true);
+    assert.equal(lastUrl, 'http://localhost:8082/danfse');
+    assert.equal(lastInit?.redirect, 'error');
+    assert.equal(typeof lastInit?.body, 'string');
+    assert.ok(!(lastInit?.body as string).includes('<!--'));
+    if (pdfOk.ok) {
+      assert.equal(pdfOk.blob.type, 'application/pdf');
+      assert.equal(pdfOk.blob.size, validPdfBytes.byteLength);
+    }
+
+    // 4. Rejeita resposta text/html disfarçada de application/pdf (magic bytes inválidos)
+    globalThis.fetch = (async () =>
+      new Response('<html><body>Fake PDF</body></html>', {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf' },
+      })) as typeof fetch;
+
+    const fakePdf = await generateOfficialDanfsePdfLocal('http://localhost:8082', validXml);
+    assert.equal(fakePdf.ok, false);
+
+    // 5. Rejeita resposta com Content-Length > MAX_DANFSE_PDF_BYTES imediatamente
+    globalThis.fetch = (async () =>
+      new Response(validPdfBytes, {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Length': String(MAX_DANFSE_PDF_BYTES + 1),
+        },
+      })) as typeof fetch;
+
+    const headerTooBig = await generateOfficialDanfsePdfLocal('http://localhost:8082', validXml);
+    assert.equal(headerTooBig.ok, false);
+
+    // 6. Rejeita stream que ultrapassa MAX_DANFSE_PDF_BYTES mesmo sem Content-Length
+    globalThis.fetch = (async () => {
+      let sent = 0;
+      const chunk = new Uint8Array(1024 * 1024); // 1 MB
+      chunk.set([0x25, 0x50, 0x44, 0x46, 0x2d], 0);
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (sent > MAX_DANFSE_PDF_BYTES) {
+            controller.close();
+            return;
+          }
+          sent += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'application/pdf' },
+      });
+    }) as typeof fetch;
+
+    const streamTooBig = await generateOfficialDanfsePdfLocal('http://localhost:8082', validXml);
+    assert.equal(streamTooBig.ok, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('18. MÉDIO-03: public/sw.js bypasses local API paths (/health, /actuator, /danfse) and returns 503 Response offline instead of undefined', async () => {
+  const swSource = readFileSync(new URL('../../public/sw.js', import.meta.url), 'utf8');
+  const listeners: Record<string, (event: unknown) => void> = {};
+
+  const sandbox = {
+    self: {
+      location: { origin: 'http://localhost:3000' },
+      addEventListener(type: string, handler: (event: unknown) => void) {
+        listeners[type] = handler;
+      },
+      skipWaiting: async () => undefined,
+      clients: { claim: async () => undefined },
+    },
+    caches: {
+      match: async () => undefined,
+      open: async () => ({
+        put: async () => undefined,
+        addAll: async () => undefined,
+      }),
+      keys: async () => [],
+      delete: async () => true,
+    },
+    fetch: async () => {
+      throw new TypeError('Offline network error');
+    },
+    URL,
+    Response,
+  };
+
+  runInNewContext(swSource, sandbox);
+  assert.equal(typeof listeners.fetch, 'function');
+
+  // Endpoints de API local não podem ser interceptados pelo SW
+  for (const apiPath of ['/health', '/health/live', '/actuator', '/actuator/health', '/danfse', '/danfse/pdf']) {
+    let intercepted = false;
+    listeners.fetch({
+      request: { method: 'GET', url: `http://localhost:3000${apiPath}`, mode: 'cors' },
+      respondWith() {
+        intercepted = true;
+      },
+    });
+    assert.equal(intercepted, false, `SW não deve interceptar ${apiPath}`);
+  }
+
+  // Asset estático sem cache offline deve retornar Response 503 (nunca undefined)
+  let staticPromise: Promise<unknown> | null = null;
+  listeners.fetch({
+    request: { method: 'GET', url: 'http://localhost:3000/assets/missing.js', mode: 'cors' },
+    respondWith(p: Promise<unknown>) {
+      staticPromise = p;
+    },
+  });
+  assert.ok(staticPromise !== null);
+  const offlineAssetResponse = await (staticPromise as Promise<unknown>);
+  assert.ok(offlineAssetResponse instanceof Response);
+  assert.equal((offlineAssetResponse as Response).status, 503);
+  assert.equal(await (offlineAssetResponse as Response).text(), 'Offline');
 });

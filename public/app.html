@@ -1,13 +1,9 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;600;700;800&family=Roboto+Flex:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://cdnjs.cloudflare.com; worker-src 'self' blob: https://cdnjs.cloudflare.com; object-src 'none'; base-uri 'self';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data:; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; connect-src 'self' https://cdnjs.cloudflare.com; worker-src 'self' blob: https://cdnjs.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'none';">
 <title>Controle Financeiro Pessoal</title>
 <style>
 
@@ -134,7 +130,7 @@
     --elevation-2: 0 4px 16px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
     --elevation-3: 0 12px 32px rgba(0, 0, 0, 0.14), 0 4px 12px rgba(0, 0, 0, 0.08);
 
-    --font-family-base: "Google Sans", "Roboto Flex", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --font-family-base: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   }
 
   /* TEMA ESCURO AUTOMÁTICO E MANUAL (DATA-THEME="DARK") */
@@ -3355,7 +3351,7 @@ function renderizarItensCmdk(query) {
 
     const estaAtivo = itemIndex === _cmdkIndexAtivo;
     htmlStr += `
-      <div class="cmdk-item ${estaAtivo ? 'active' : ''}" onclick="executarComandoCmdk('${cmd.id}')" role="option" aria-selected="${estaAtivo}">
+      <div class="cmdk-item ${estaAtivo ? 'active' : ''}" onclick="executarComandoCmdk('${escapeAttrId(cmd.id)}')" role="option" aria-selected="${estaAtivo}">
         <div class="cmdk-item-left">
           ${getM3Icon(cmd.icone, "m3-icon-sm")}
           <span>${escapeHtml(cmd.titulo)}</span>
@@ -3875,6 +3871,7 @@ async function tentarUnlock(senha) {
         const jsonStr = new TextDecoder().decode(pt);
         const dadosDecifrados = JSON.parse(jsonStr);
         dadosDecifrados.seguranca = sec;
+        higienizarIdsEstado(dadosDecifrados);
         appState = dadosDecifrados;
         window.appState = appState;
         wipeBytes(ct, iv, pt);
@@ -3883,6 +3880,19 @@ async function tentarUnlock(senha) {
         throw new Error("Falha ao decifrar os dados. Arquivo corrompido ou chave inválida.");
       }
     }
+  } else {
+    try {
+      const rawPlain = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(STORAGE_KEY + "_backup");
+      if (rawPlain) {
+        const parsedPlain = JSON.parse(rawPlain);
+        if (parsedPlain && typeof parsedPlain === "object" && !isVaultPayload(parsedPlain)) {
+          parsedPlain.seguranca = sec;
+          higienizarIdsEstado(parsedPlain);
+          appState = parsedPlain;
+          window.appState = appState;
+        }
+      }
+    } catch(e) {}
   }
 
   destrancarCofre();
@@ -3917,29 +3927,66 @@ async function tentarRecovery(chave) {
   wipeBytes(senhaBytes, env, iv, saltRecKey);
 
   await tentarUnlock(senhaMestra);
-  return senhaMestra;
+  return true;
 }
 
-function trancarCofre() {
-  if (!appState.seguranca?.enabled) return;
-  persistirEstadoAsync().catch(() => {});
-  
+let _lockingInProgress = false;
+
+async function trancarCofre() {
+  if (!appState.seguranca?.enabled || _lockingInProgress) return;
+  _lockingInProgress = true;
+  clearTimeout(_idleTimer);
+  clearTimeout(_bgLockTimer);
+  if (typeof _salarioDebounceTimer !== "undefined" && _salarioDebounceTimer) {
+    clearTimeout(_salarioDebounceTimer);
+    _salarioDebounceTimer = null;
+  }
+
+  try {
+    if (_isUnlocked) {
+      await persistirEstadoAsync().catch(() => {});
+    }
+  } finally {
+    _lockingInProgress = false;
+  }
+
   _vaultKey = null;
   _isUnlocked = false;
-  clearTimeout(_idleTimer);
+  _ultimaChaveRecuperacao = null;
+  const recBanner = document.getElementById("bannerChaveRecuperacao");
+  if (recBanner) recBanner.innerText = "";
 
-  if (appState.seguranca.cifrar) {
-    const sec = appState.seguranca;
+  const sec = appState.seguranca;
+  if (sec.cifrar) {
     try {
       const rawVault = localStorage.getItem(STORAGE_KEY);
-      if (rawVault) _vaultLoadedFromDisk = JSON.parse(rawVault);
+      if (rawVault) {
+        const parsed = JSON.parse(rawVault);
+        if (isVaultPayload(parsed)) _vaultLoadedFromDisk = parsed;
+      }
     } catch(e) {}
-    appState = {
-      ...structuredClone(ESTADO_PADRAO),
-      seguranca: sec
-    };
-    window.appState = appState;
   }
+
+  // Purga estado sensível em memória e limpa todos os saldos do DOM atrás do #lockOverlay
+  appState = {
+    ...structuredClone(ESTADO_PADRAO),
+    seguranca: sec
+  };
+  window.appState = appState;
+  _holeritePendente = null;
+  _ultimoParsedQuickExpense = null;
+
+  if (document.activeElement && typeof document.activeElement.blur === "function") {
+    document.activeElement.blur();
+  }
+
+  const modalPurgeIds = ["tabelaMoldeDespesas", "holeriteOcrPreview", "holeriteOcrStatus", "cmdkResults", "conteudoModalSeguranca"];
+  modalPurgeIds.forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = "";
+  });
+
+  renderizarTudo();
 
   const overlay = document.getElementById("lockOverlay");
   if (overlay) {
@@ -4330,10 +4377,12 @@ async function confirmarRecoveryKey() {
   }
 
   try {
-    const senhaRecuperada = await tentarRecovery(chave);
+    await tentarRecovery(chave);
+    if (inp) inp.value = "";
     fecharModais();
     destrancarCofre();
-    alert(`Acesso recuperado com sucesso!\nSua senha mestra é: ${senhaRecuperada}\n\nRecomendamos alterar sua senha ou guardá-la em segurança.`);
+    exibirToast("Cofre desbloqueado com sucesso via Recovery Key. Se necessário, redefina sua senha mestra na Central de Segurança.", 8000);
+    anunciarA11y("Cofre desbloqueado via Recovery Key. Redefina sua senha mestra na Central de Segurança se necessário.");
   } catch(err) {
     if (errEl) errEl.innerText = err.message;
   }
@@ -4417,6 +4466,13 @@ function carregarDados() {
         return {
           ...structuredClone(ESTADO_PADRAO),
           seguranca: data.seguranca || data.security || {}
+        };
+      }
+      if (data && typeof data === "object" && data.seguranca?.enabled) {
+        _isUnlocked = false;
+        return {
+          ...structuredClone(ESTADO_PADRAO),
+          seguranca: data.seguranca
         };
       }
       if (!data.historicoContracheques || !Array.isArray(data.historicoContracheques)) {
@@ -4514,6 +4570,7 @@ function carregarDados() {
       } else if (typeof data.configuracoes.taxaCdiAnual !== "number") {
         data.configuracoes.taxaCdiAnual = 10.5;
       }
+      higienizarIdsEstado(data);
       return data;
     } catch(e) { console.error("Erro ao carregar dados:", e); }
   }
@@ -4522,7 +4579,7 @@ function carregarDados() {
 
 async function persistirEstadoAsync() {
   // GUARDA CRÍTICA: Nunca sobrescrever armazenamento se o cofre estiver habilitado e trancado
-  if (appState.seguranca?.enabled && appState.seguranca?.cifrar && (!_isUnlocked || !_vaultKey)) {
+  if (appState.seguranca?.enabled && (!_isUnlocked || (appState.seguranca?.cifrar && !_vaultKey))) {
     return;
   }
   window.appState = appState;
@@ -4576,6 +4633,116 @@ function escapeHtml(str) {
     .replace(/'/g, "&#039;");
 }
 
+function escapeAttrId(id) {
+  if (id === null || id === undefined) return "";
+  return escapeHtml(String(id).replace(/[^a-zA-Z0-9_-]/g, ""));
+}
+
+function sanitizarId(id, fallback) {
+  const clean = String(id ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
+  return clean || fallback;
+}
+
+function higienizarIdsEstado(data) {
+  if (!data || typeof data !== "object") return data;
+
+  if (Array.isArray(data.historicoContracheques)) {
+    data.historicoContracheques.forEach((hc, idx) => {
+      if (!hc || typeof hc !== "object") return;
+      hc.id = sanitizarId(hc.id, "hc_" + sanitizarId(hc.competencia, String(idx + 1)));
+      if (Array.isArray(hc.proventos)) {
+        hc.proventos.forEach((p, pIdx) => {
+          if (p && typeof p === "object") p.id = sanitizarId(p.id, `hp_${idx}_${pIdx + 1}`);
+        });
+      }
+      if (Array.isArray(hc.descontos)) {
+        hc.descontos.forEach((d, dIdx) => {
+          if (d && typeof d === "object") d.id = sanitizarId(d.id, `hd_${idx}_${dIdx + 1}`);
+        });
+      }
+    });
+  }
+
+  if (data.salario && typeof data.salario === "object") {
+    if (Array.isArray(data.salario.proventos)) {
+      data.salario.proventos.forEach((p, idx) => {
+        if (p && typeof p === "object") {
+          p.id = sanitizarId(p.id, "p_" + (idx + 1) + "_" + Math.random().toString(36).slice(2, 6));
+        }
+      });
+    }
+    if (Array.isArray(data.salario.descontos)) {
+      data.salario.descontos.forEach((d, idx) => {
+        if (d && typeof d === "object") {
+          d.id = sanitizarId(d.id, "d_" + (idx + 1) + "_" + Math.random().toString(36).slice(2, 6));
+        }
+      });
+    }
+  }
+
+  if (Array.isArray(data.bancos)) {
+    data.bancos.forEach((b, idx) => {
+      if (b && typeof b === "object") {
+        b.id = sanitizarId(b.id, `b_${idx + 1}`);
+      }
+    });
+  }
+
+  if (Array.isArray(data.caixinhas)) {
+    data.caixinhas.forEach((c, idx) => {
+      if (c && typeof c === "object") {
+        c.id = sanitizarId(c.id, `cx_${idx + 1}`);
+      }
+    });
+  }
+
+  if (Array.isArray(data.cartoes)) {
+    data.cartoes.forEach((c, idx) => {
+      if (c && typeof c === "object") {
+        c.id = sanitizarId(c.id, `card_${idx + 1}`);
+      }
+    });
+  }
+
+  if (Array.isArray(data.despesasFixasMolde)) {
+    data.despesasFixasMolde.forEach((m, idx) => {
+      if (m && typeof m === "object") {
+        m.id = sanitizarId(m.id, `m_${idx + 1}`);
+      }
+    });
+  }
+
+  if (data.despesasPorMes && typeof data.despesasPorMes === "object") {
+    for (const [comp, lista] of Object.entries(data.despesasPorMes)) {
+      if (!Array.isArray(lista)) continue;
+      const compSafe = sanitizarId(comp, "mes");
+      lista.forEach((d, idx) => {
+        if (d && typeof d === "object") {
+          d.id = sanitizarId(d.id, `d_${compSafe}_${idx + 1}`);
+          if (d.moldeId) d.moldeId = sanitizarId(d.moldeId, null);
+          if (d.contaOrigemId) d.contaOrigemId = sanitizarId(d.contaOrigemId, null);
+        }
+      });
+    }
+  }
+
+  if (Array.isArray(data.despesas)) {
+    data.despesas.forEach((d, idx) => {
+      if (d && typeof d === "object") {
+        d.id = sanitizarId(d.id, `d_${idx + 1}`);
+        if (d.moldeId) d.moldeId = sanitizarId(d.moldeId, null);
+        if (d.contaOrigemId) d.contaOrigemId = sanitizarId(d.contaOrigemId, null);
+      }
+    });
+  }
+
+  if (typeof data.competenciaAtual !== "string" || !/^\d{4}-\d{2}$/.test(data.competenciaAtual)) {
+    data.competenciaAtual = ESTADO_PADRAO.competenciaAtual;
+  }
+
+  return data;
+}
+
 function hoje() {
   const d = new Date();
   const a = d.getFullYear();
@@ -4586,9 +4753,10 @@ function hoje() {
 
 function fmtData(isoStr) {
   if (!isoStr) return "";
-  const parts = isoStr.split("-");
-  if (parts.length < 3) return isoStr;
-  return `${parts[2]}/${parts[1]}/${parts[0]}`;
+  const s = String(isoStr).trim();
+  const match = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) return `${match[3]}/${match[2]}/${match[1]}`;
+  return escapeHtml(s);
 }
 
 function obterCompetenciaAtual() {
@@ -4615,7 +4783,7 @@ function obterDespesasDoMes(compKey) {
     appState.despesasPorMes[compKey] = molde
       .filter(m => m.ativa !== false)
       .map(m => ({
-        id: "d_" + compKey.replace("-", "") + "_" + Math.random().toString(36).substring(2, 8),
+        id: "d_" + sanitizarId(compKey, "mes").replace(/-/g, "") + "_" + Math.random().toString(36).substring(2, 8),
         moldeId: m.id,
         descricao: m.descricao,
         valor: Number(m.valorPadrao) || 0,
@@ -4819,7 +4987,7 @@ function adicionarOuFocarProvento(nome, valor = 0) {
   if (!appState.salario.proventos) appState.salario.proventos = [];
   const existente = appState.salario.proventos.find(p => p.nome.toLowerCase() === String(nome).toLowerCase());
   if (existente) {
-    const row = document.querySelector(`.entry-row[data-id="${existente.id}"]`);
+    const row = document.querySelector(`.entry-row[data-id="${escapeAttrId(existente.id)}"]`);
     if (row) {
       const inp = row.querySelector('input[type="number"]');
       if (inp) {
@@ -4883,7 +5051,7 @@ function adicionarOuFocarDesconto(nome, valor = 0) {
   if (!appState.salario.descontos) appState.salario.descontos = [];
   const existente = appState.salario.descontos.find(d => d.nome.toLowerCase() === String(nome).toLowerCase());
   if (existente) {
-    const row = document.querySelector(`.entry-row[data-id="${existente.id}"]`);
+    const row = document.querySelector(`.entry-row[data-id="${escapeAttrId(existente.id)}"]`);
     if (row) {
       const inp = row.querySelector('input[type="number"]');
       if (inp) {
@@ -4933,7 +5101,7 @@ function abrirModalReceberSalario() {
 
   const selConta = document.getElementById("receberSalarioContaDestino");
   if (selConta) {
-    selConta.innerHTML = appState.bancos.map(b => `<option value="${b.id}">${escapeHtml(b.nome)} (Saldo atual: ${fmtBRL(b.saldo)})</option>`).join("");
+    selConta.innerHTML = appState.bancos.map(b => `<option value="${escapeAttrId(b.id)}">${escapeHtml(b.nome)} (Saldo atual: ${fmtBRL(b.saldo)})</option>`).join("");
   }
 
   const elLiq = document.getElementById("modalReceberSalarioLiquidoVal");
@@ -5035,7 +5203,7 @@ function salvarCompetenciaNoHistorico() {
   if (!appState.historicoContracheques) appState.historicoContracheques = [];
   const idx = appState.historicoContracheques.findIndex(h => h.competencia === comp);
   const entrada = {
-    id: "hc_" + comp.replace("-", "_"),
+    id: "hc_" + comp.replace(/[^a-zA-Z0-9_]/g, "_"),
     competencia: comp,
     mesLabel: mesLabel,
     proventos: structuredClone(appState.salario.proventos || []),
@@ -5099,12 +5267,17 @@ async function loadPdfJs() {
   _pdfJsLoading = new Promise((resolve, reject) => {
     const s = document.createElement("script");
     s.src = `${PDFJS_CDN}/pdf.min.js`;
+    s.crossOrigin = "anonymous";
+    s.referrerPolicy = "no-referrer";
     s.onload = () => {
       if (!window.pdfjsLib) return reject(new Error("PDF.js não carregou"));
       window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.js`;
       resolve(window.pdfjsLib);
     };
-    s.onerror = () => reject(new Error("Sem conexão ou CDN do PDF.js bloqueado"));
+    s.onerror = () => {
+      _pdfJsLoading = null;
+      reject(new Error("Sem conexão ou CDN do PDF.js bloqueado"));
+    };
     document.head.appendChild(s);
   });
   return _pdfJsLoading;
@@ -5119,11 +5292,16 @@ async function loadTesseract() {
   _tesseractLoading = new Promise((resolve, reject) => {
     const s = document.createElement("script");
     s.src = TESSERACT_CDN;
+    s.crossOrigin = "anonymous";
+    s.referrerPolicy = "no-referrer";
     s.onload = () => {
       if (window.Tesseract) resolve(window.Tesseract);
       else reject(new Error("Tesseract.js não foi exportado"));
     };
-    s.onerror = () => reject(new Error("Sem conexão ou CDN do Tesseract bloqueado"));
+    s.onerror = () => {
+      _tesseractLoading = null;
+      reject(new Error("Sem conexão ou CDN do Tesseract bloqueado"));
+    };
     document.head.appendChild(s);
   });
   return _tesseractLoading;
@@ -5586,8 +5764,8 @@ function renderizarRelatorioContracheque() {
           <div class="item-values" style="display: flex; flex-direction: column; align-items: flex-end; gap: 4px;">
             <div class="item-main-val" style="color: var(--accent);">${fmtBRL(folha.liquido)}</div>
             <div style="display: flex; gap: 6px; margin-top: 4px;">
-              <button type="button" class="btn btn-outline btn-sm" onclick="carregarFolhaHistoricoParaAtual('${folha.id}')" title="Carregar no painel de edição ativo">${getM3Icon("sync", "m3-icon-sm")} <span>Carregar</span></button>
-              <button type="button" class="btn btn-danger btn-sm" onclick="excluirHistoricoMes('${folha.id}')" aria-label="Remover folha ${escapeHtml(folha.mesLabel)}">${getM3Icon("delete", "m3-icon-sm")}</button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="carregarFolhaHistoricoParaAtual('${escapeAttrId(folha.id)}')" title="Carregar no painel de edição ativo">${getM3Icon("sync", "m3-icon-sm")} <span>Carregar</span></button>
+              <button type="button" class="btn btn-danger btn-sm" onclick="excluirHistoricoMes('${escapeAttrId(folha.id)}')" aria-label="Remover folha ${escapeHtml(folha.mesLabel)}">${getM3Icon("delete", "m3-icon-sm")}</button>
             </div>
           </div>
         </div>
@@ -5649,12 +5827,13 @@ function avaliarDicasComprovadas(state) {
 
   // 3. Dica: Otimizador de Cartão
   state.cartoes.forEach(cartao => {
-    if (diaHoje >= cartao.diaCorte && diaHoje <= (cartao.diaCorte + 4)) {
+    const diaCorteNum = Number(cartao.diaCorte) || 1;
+    if (diaHoje >= diaCorteNum && diaHoje <= (diaCorteNum + 4)) {
       dicas.push({
         tipo: "info",
         icone: getM3Icon("credit_card"),
         titulo: `Melhor Janela de Compra: ${cartao.nome}`,
-        texto: `A fatura deste cartão fechou por volta do dia ${cartao.diaCorte}. Compras efetuadas hoje só vencerão no próximo ciclo, garantindo até 40 dias de prazo sem custos enquanto seu dinheiro permanece rendendo.`
+        texto: `A fatura deste cartão fechou por volta do dia ${diaCorteNum}. Compras efetuadas hoje só vencerão no próximo ciclo, garantindo até 40 dias de prazo sem custos enquanto seu dinheiro permanece rendendo.`
       });
     }
   });
@@ -5875,7 +6054,7 @@ function renderizarTudo() {
               <span class="card-sub" style="white-space: nowrap;">Aporte: <span class="caixinha-aporte-val">${fmtBRL(cx.aporteMensal)}</span>/mês</span>
             </div>
           </div>
-          <button class="btn btn-accent btn-sm" onclick="abrirAporteCaixinha('${cx.id}')" style="flex-shrink: 0;" aria-label="Aportar na caixinha ${escapeHtml(cx.nome)}">Aportar</button>
+          <button class="btn btn-accent btn-sm" onclick="abrirAporteCaixinha('${escapeAttrId(cx.id)}')" style="flex-shrink: 0;" aria-label="Aportar na caixinha ${escapeHtml(cx.nome)}">Aportar</button>
         </div>
         <div style="display: flex; justify-content: space-between; align-items: baseline; margin-top: 4px;">
           <span class="caixinha-saldo-val" style="font-size: 1.4rem; font-weight: 800; color: var(--text-primary);">${fmtBRL(cx.saldo)}</span>
@@ -5959,11 +6138,11 @@ function renderizarTudo() {
   const containerDicas = document.getElementById("mentorContainer");
   const listaDicas = avaliarDicasComprovadas(appState);
   containerDicas.innerHTML = listaDicas.map(d => `
-    <div class="mentor-card ${d.tipo}">
+    <div class="mentor-card ${escapeAttrId(d.tipo)}">
       <span class="mentor-icon">${d.icone}</span>
       <div class="mentor-body">
-        <div class="mentor-title">${d.titulo}</div>
-        <div class="mentor-text">${d.texto}</div>
+        <div class="mentor-title">${escapeHtml(d.titulo)}</div>
+        <div class="mentor-text">${escapeHtml(d.texto)}</div>
       </div>
     </div>
   `).join("");
@@ -6018,7 +6197,7 @@ function renderizarTudo() {
             <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
               <span class="item-name" style="font-size: 1.05rem;">${getM3Icon("account_balance")} ${escapeHtml(b.nome)}</span>
               <span class="tag-yield ${b.rendeJuros ? 'on' : 'off'}">
-                ${b.rendeJuros ? `${getM3Icon("trending_up", "m3-icon-sm")} Rende ${b.pctCDI || 100}% do CDI` : 'Não Rende (0% - Saldo Estático)'}
+                ${b.rendeJuros ? `${getM3Icon("trending_up", "m3-icon-sm")} Rende ${Number(b.pctCDI) || 100}% do CDI` : 'Não Rende (0% - Saldo Estático)'}
               </span>
             </div>
             <div class="item-detail" style="margin-top: 4px;">
@@ -6031,9 +6210,9 @@ function renderizarTudo() {
           <div class="item-values">
             <div class="item-main-val" style="font-size: 1.25rem;">${fmtBRL(b.saldo)}</div>
             <div style="display: flex; gap: 6px; margin-top: 6px;">
-              <button class="btn btn-outline btn-sm" onclick="ajustarSaldoBanco('${escapeHtml(b.id)}')">${getM3Icon("edit")} <span>Ajustar saldo</span></button>
+              <button class="btn btn-outline btn-sm" onclick="ajustarSaldoBanco('${escapeAttrId(b.id)}')">${getM3Icon("edit")} <span>Ajustar saldo</span></button>
               <button class="btn btn-outline btn-sm" onclick="abrirModalTransferencia()">${getM3Icon("sync")} <span>Transferir via Pix</span></button>
-              <button class="btn btn-danger btn-sm" onclick="removerBanco('${escapeHtml(b.id)}')" aria-label="Remover conta ${escapeHtml(b.nome)}">${getM3Icon("delete")}</button>
+              <button class="btn btn-danger btn-sm" onclick="removerBanco('${escapeAttrId(b.id)}')" aria-label="Remover conta ${escapeHtml(b.nome)}">${getM3Icon("delete")}</button>
             </div>
           </div>
         </div>
@@ -6085,9 +6264,9 @@ function renderizarTudo() {
               </div>
             </div>
             <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-              <button class="btn btn-sm btn-accent" onclick="abrirAporteCaixinha('${cxAposentadoria.id}')">+ Realizar Aporte</button>
-              <button class="btn btn-sm btn-outline" onclick="abrirModalEditarAposentadoria('${cxAposentadoria.id}')">${getM3Icon("edit")} <span>Editar</span></button>
-              <button class="btn btn-sm btn-danger" onclick="removerCaixinha('${cxAposentadoria.id}')" aria-label="Excluir caixinha de aposentadoria ${escapeHtml(cxAposentadoria.nome)}">${getM3Icon("delete")}</button>
+              <button class="btn btn-sm btn-accent" onclick="abrirAporteCaixinha('${escapeAttrId(cxAposentadoria.id)}')">+ Realizar Aporte</button>
+              <button class="btn btn-sm btn-outline" onclick="abrirModalEditarAposentadoria('${escapeAttrId(cxAposentadoria.id)}')">${getM3Icon("edit")} <span>Editar</span></button>
+              <button class="btn btn-sm btn-danger" onclick="removerCaixinha('${escapeAttrId(cxAposentadoria.id)}')" aria-label="Excluir caixinha de aposentadoria ${escapeHtml(cxAposentadoria.nome)}">${getM3Icon("delete")}</button>
             </div>
           </div>
 
@@ -6192,8 +6371,8 @@ function renderizarTudo() {
           <div class="item-values">
             <div class="item-main-val" style="font-size: 1.25rem;">${fmtBRL(cx.saldo)}</div>
             <div style="display: flex; gap: 6px; margin-top: 4px;">
-              <button class="btn btn-accent btn-sm" onclick="abrirAporteCaixinha('${cx.id}')">Aportar</button>
-              <button class="btn btn-danger btn-sm" onclick="removerCaixinha('${cx.id}')" aria-label="Remover meta ${escapeHtml(cx.nome)}">Remover meta</button>
+              <button class="btn btn-accent btn-sm" onclick="abrirAporteCaixinha('${escapeAttrId(cx.id)}')">Aportar</button>
+              <button class="btn btn-danger btn-sm" onclick="removerCaixinha('${escapeAttrId(cx.id)}')" aria-label="Remover meta ${escapeHtml(cx.nome)}">Remover meta</button>
             </div>
           </div>
         </div>
@@ -6206,12 +6385,13 @@ function renderizarTudo() {
   const isEditingProventos = containerProventos && containerProventos.contains(document.activeElement) && document.activeElement.tagName === "INPUT";
   if (containerProventos && !isEditingProventos) {
     containerProventos.innerHTML = (appState.salario.proventos || []).map((p, idx) => {
-      p.id = p.id || ("p_" + (idx + 1) + "_" + Date.now());
+      p.id = sanitizarId(p.id, "p_" + (idx + 1) + "_" + Date.now());
+      const pid = escapeAttrId(p.id);
       return `
-      <div class="entry-row" data-id="${p.id}">
-        <input type="text" value="${escapeHtml(p.nome)}" placeholder="Descrição" aria-label="Descrição do ganho" oninput="atualizarProvento('${p.id}', 'nome', this.value)" onchange="atualizarProvento('${p.id}', 'nome', this.value)">
-        <input type="number" step="0.01" value="${p.valor}" placeholder="0,00" aria-label="Valor do ganho em reais" oninput="atualizarProvento('${p.id}', 'valor', this.value)" onchange="atualizarProvento('${p.id}', 'valor', this.value)">
-        <button type="button" class="btn-icon" onclick="removerProvento('${p.id}')" title="Remover ganho" aria-label="Remover ganho ${escapeHtml(p.nome)}">${getM3Icon("delete")}</button>
+      <div class="entry-row" data-id="${pid}">
+        <input type="text" value="${escapeHtml(p.nome)}" placeholder="Descrição" aria-label="Descrição do ganho" oninput="atualizarProvento('${pid}', 'nome', this.value)" onchange="atualizarProvento('${pid}', 'nome', this.value)">
+        <input type="number" step="0.01" value="${Number(p.valor) || 0}" placeholder="0,00" aria-label="Valor do ganho em reais" oninput="atualizarProvento('${pid}', 'valor', this.value)" onchange="atualizarProvento('${pid}', 'valor', this.value)">
+        <button type="button" class="btn-icon" onclick="removerProvento('${pid}')" title="Remover ganho" aria-label="Remover ganho ${escapeHtml(p.nome)}">${getM3Icon("delete")}</button>
       </div>
     `;
     }).join("");
@@ -6221,12 +6401,13 @@ function renderizarTudo() {
   const isEditingDescontos = containerDescontos && containerDescontos.contains(document.activeElement) && document.activeElement.tagName === "INPUT";
   if (containerDescontos && !isEditingDescontos) {
     containerDescontos.innerHTML = (appState.salario.descontos || []).map((d, idx) => {
-      d.id = d.id || ("d_" + (idx + 1) + "_" + Date.now());
+      d.id = sanitizarId(d.id, "d_" + (idx + 1) + "_" + Date.now());
+      const did = escapeAttrId(d.id);
       return `
-      <div class="entry-row" data-id="${d.id}">
-        <input type="text" value="${escapeHtml(d.nome)}" placeholder="Descrição" aria-label="Descrição do desconto" oninput="atualizarDesconto('${d.id}', 'nome', this.value)" onchange="atualizarDesconto('${d.id}', 'nome', this.value)">
-        <input type="number" step="0.01" value="${d.valor}" placeholder="0,00" aria-label="Valor do desconto em reais" oninput="atualizarDesconto('${d.id}', 'valor', this.value)" onchange="atualizarDesconto('${d.id}', 'valor', this.value)">
-        <button type="button" class="btn-icon" onclick="removerDesconto('${d.id}')" title="Remover desconto" aria-label="Remover desconto ${escapeHtml(d.nome)}">${getM3Icon("delete")}</button>
+      <div class="entry-row" data-id="${did}">
+        <input type="text" value="${escapeHtml(d.nome)}" placeholder="Descrição" aria-label="Descrição do desconto" oninput="atualizarDesconto('${did}', 'nome', this.value)" onchange="atualizarDesconto('${did}', 'nome', this.value)">
+        <input type="number" step="0.01" value="${Number(d.valor) || 0}" placeholder="0,00" aria-label="Valor do desconto em reais" oninput="atualizarDesconto('${did}', 'valor', this.value)" onchange="atualizarDesconto('${did}', 'valor', this.value)">
+        <button type="button" class="btn-icon" onclick="removerDesconto('${did}')" title="Remover desconto" aria-label="Remover desconto ${escapeHtml(d.nome)}">${getM3Icon("delete")}</button>
       </div>
     `;
     }).join("");
@@ -6288,11 +6469,11 @@ function renderizarTudo() {
       <div class="item-row">
         <div class="item-info">
           <div class="item-name">${getM3Icon("credit_card")} ${escapeHtml(c.nome)}</div>
-          <div class="item-detail">Fecha dia: <strong>${c.diaCorte}</strong> | Vence dia: <strong>${c.diaVencimento}</strong></div>
+          <div class="item-detail">Fecha dia: <strong>${escapeHtml(c.diaCorte)}</strong> | Vence dia: <strong>${escapeHtml(c.diaVencimento)}</strong></div>
         </div>
         <div class="item-values">
-          <div class="item-main-val">${c.beneficio}</div>
-          <button class="btn btn-danger btn-sm" onclick="removerCartao('${c.id}')" style="margin-top: 4px;" aria-label="Remover cartão ${escapeHtml(c.nome)}">Remover cartão</button>
+          <div class="item-main-val">${escapeHtml(c.beneficio)}</div>
+          <button class="btn btn-danger btn-sm" onclick="removerCartao('${escapeAttrId(c.id)}')" style="margin-top: 4px;" aria-label="Remover cartão ${escapeHtml(c.nome)}">Remover cartão</button>
         </div>
       </div>
     `).join("");
@@ -6305,7 +6486,7 @@ function renderizarTudo() {
       containerDespesas.innerHTML = `
         <div style="text-align: center; padding: 36px 20px; background: var(--md-sys-color-surface-container-low); border: 1px dashed var(--md-sys-color-outline-variant); border-radius: var(--radius);">
           <div style="font-size: 2.2rem; color: var(--md-sys-color-primary); margin-bottom: 10px;">${getM3Icon("inbox", "m3-icon-lg")}</div>
-          <strong style="color: var(--md-sys-color-on-surface); font-size: 1.05rem; display: block; margin-bottom: 6px;">Nenhuma conta registrada em ${obterNomeMesAno(compAtual)}</strong>
+          <strong style="color: var(--md-sys-color-on-surface); font-size: 1.05rem; display: block; margin-bottom: 6px;">Nenhuma conta registrada em ${escapeHtml(obterNomeMesAno(compAtual))}</strong>
           <p style="font-size: 0.88rem; color: var(--md-sys-color-on-surface-variant); max-width: 440px; margin: 0 auto 16px auto; line-height: 1.4;">
             Importe os compromissos cadastrados no seu molde recorrente ou registre um novo gasto avulso para gerenciar este mês.
           </p>
@@ -6317,7 +6498,7 @@ function renderizarTudo() {
       `;
     } else {
       containerDespesas.innerHTML = despesasDoMes.map(d => {
-        const diaTxt = d.diaVencimento ? `Vencimento: Dia ${d.diaVencimento}` : 'Sem dia definido';
+        const diaTxt = d.diaVencimento ? `Vencimento: Dia ${escapeHtml(d.diaVencimento)}` : 'Sem dia definido';
         const tagTipo = d.moldeId 
           ? `<span class="badge" style="background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container);">${getM3Icon("sync", "m3-icon-sm")} Recorrente</span>` 
           : `<span class="badge" style="background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container);">${getM3Icon("bolt", "m3-icon-sm")} Extra deste Mês</span>`;
@@ -6328,7 +6509,7 @@ function renderizarTudo() {
           statusHtml = `
             <div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
               <span class="badge" style="background: var(--md-sys-color-primary-container); color: var(--md-sys-color-on-primary-container); font-weight: 700;">${getM3Icon("check_circle", "m3-icon-sm")} Paga</span>
-              <span style="font-size: 0.75rem; color: var(--text-secondary);">${d.dataPagamento ? 'Quitada em ' + fmtData(d.dataPagamento) : 'Quitada'}${d.contaOrigem ? ' (' + escapeHtml(d.contaOrigem) + ')' : ''}</span>
+              <span style="font-size: 0.75rem; color: var(--text-secondary);">${d.dataPagamento ? 'Quitada em ' + escapeHtml(fmtData(d.dataPagamento)) : 'Quitada'}${d.contaOrigem ? ' (' + escapeHtml(d.contaOrigem) + ')' : ''}</span>
             </div>
           `;
         } else {
@@ -6340,6 +6521,7 @@ function renderizarTudo() {
           `;
         }
 
+        const did = escapeAttrId(d.id);
         return `
           <div class="item-row" style="background: ${d.paga ? 'var(--md-sys-color-surface-container-lowest)' : 'var(--md-sys-color-surface-container-low)'}; border-left: 4px solid ${d.paga ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-error)'};">
             <div class="item-info">
@@ -6356,11 +6538,11 @@ function renderizarTudo() {
               <div class="item-main-val" style="${d.paga ? 'opacity: 0.75;' : ''}">${fmtBRL(d.valor)}</div>
               <div style="display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end;">
                 ${d.paga 
-                  ? `<button class="btn btn-outline btn-sm" onclick="desfazerPagamentoDespesa('${d.id}')" title="Desmarcar / Estornar pagamento">${getM3Icon("undo", "m3-icon-sm")} <span>Desfazer quitação</span></button>`
-                  : `<button class="btn btn-accent btn-sm" onclick="abrirModalQuitarDespesa('${d.id}')" title="Marcar como paga e escolher banco">${getM3Icon("check_circle", "m3-icon-sm")} <span>Pagar despesa</span></button>`
+                  ? `<button class="btn btn-outline btn-sm" onclick="desfazerPagamentoDespesa('${did}')" title="Desmarcar / Estornar pagamento">${getM3Icon("undo", "m3-icon-sm")} <span>Desfazer quitação</span></button>`
+                  : `<button class="btn btn-accent btn-sm" onclick="abrirModalQuitarDespesa('${did}')" title="Marcar como paga e escolher banco">${getM3Icon("check_circle", "m3-icon-sm")} <span>Pagar despesa</span></button>`
                 }
-                <button class="btn btn-outline btn-sm" onclick="abrirModalEditarValorDespesa('${d.id}')" title="Ajustar valor especificamente deste mês (ex: conta de luz)">${getM3Icon("edit", "m3-icon-sm")} <span>Ajustar valor</span></button>
-                <button class="btn btn-danger btn-sm" onclick="removerDespesaDoMes('${d.id}')" title="Remover desta competência" aria-label="Remover conta ${escapeHtml(d.descricao)} deste mês">${getM3Icon("delete")}</button>
+                <button class="btn btn-outline btn-sm" onclick="abrirModalEditarValorDespesa('${did}')" title="Ajustar valor especificamente deste mês (ex: conta de luz)">${getM3Icon("edit", "m3-icon-sm")} <span>Ajustar valor</span></button>
+                <button class="btn btn-danger btn-sm" onclick="removerDespesaDoMes('${did}')" title="Remover desta competência" aria-label="Remover conta ${escapeHtml(d.descricao)} deste mês">${getM3Icon("delete")}</button>
               </div>
             </div>
           </div>
@@ -7279,8 +7461,8 @@ function abrirModalTransferencia() {
   const selOrigem = document.getElementById("transfOrigem");
   const selDestino = document.getElementById("transfDestino");
   
-  selOrigem.innerHTML = appState.bancos.map(b => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.nome)} (${fmtBRL(b.saldo)})</option>`).join("");
-  selDestino.innerHTML = appState.bancos.map((b, i) => `<option value="${escapeHtml(b.id)}" ${i === 1 ? 'selected' : ''}>${escapeHtml(b.nome)} (${fmtBRL(b.saldo)})</option>`).join("");
+  selOrigem.innerHTML = appState.bancos.map(b => `<option value="${escapeAttrId(b.id)}">${escapeHtml(b.nome)} (${fmtBRL(b.saldo)})</option>`).join("");
+  selDestino.innerHTML = appState.bancos.map((b, i) => `<option value="${escapeAttrId(b.id)}" ${i === 1 ? 'selected' : ''}>${escapeHtml(b.nome)} (${fmtBRL(b.saldo)})</option>`).join("");
   
   document.getElementById("transfValor").value = "";
   exibirModal("modalTransferencia");
@@ -7411,7 +7593,7 @@ function abrirAporteCaixinha(id) {
   document.getElementById("aporteCaixinhaValor").value = cx.aporteMensal || 200;
 
   const select = document.getElementById("aporteCaixinhaBancoOrigem");
-  select.innerHTML = appState.bancos.map(b => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.nome)} (Saldo: ${fmtBRL(b.saldo)})</option>`).join("");
+  select.innerHTML = appState.bancos.map(b => `<option value="${escapeAttrId(b.id)}">${escapeHtml(b.nome)} (Saldo: ${fmtBRL(b.saldo)})</option>`).join("");
 
   exibirModal("modalAporteCaixinha");
 }
@@ -7495,14 +7677,14 @@ function renderizarListaMoldeDespesas() {
           ${m.ativa === false ? `<span class="badge" style="background:var(--md-sys-color-error-container); color:var(--md-sys-color-on-error-container); font-size:0.7rem;">Inativa</span>` : ''}
         </div>
         <div style="font-size:0.8rem; color:var(--text-secondary); margin-top:2px;">
-          Vence dia: <strong>${m.diaVencimento || 10}</strong> | Valor Padrão Estimado: <strong style="color:var(--accent);">${fmtBRL(m.valorPadrao)}</strong>
+          Vence dia: <strong>${escapeHtml(m.diaVencimento || 10)}</strong> | Valor Padrão Estimado: <strong style="color:var(--accent);">${fmtBRL(m.valorPadrao)}</strong>
         </div>
       </div>
       <div style="display:flex; align-items:center; gap:8px;">
-        <button class="btn btn-sm ${m.ativa !== false ? 'btn-outline' : 'btn-secondary'}" onclick="alternarStatusMolde('${m.id}')" title="${m.ativa !== false ? 'Desativar este item do molde' : 'Ativar este item do molde'}" aria-label="${m.ativa !== false ? 'Desativar item do molde' : 'Ativar item do molde'}">
+        <button class="btn btn-sm ${m.ativa !== false ? 'btn-outline' : 'btn-secondary'}" onclick="alternarStatusMolde('${escapeAttrId(m.id)}')" title="${m.ativa !== false ? 'Desativar este item do molde' : 'Ativar este item do molde'}" aria-label="${m.ativa !== false ? 'Desativar item do molde' : 'Ativar item do molde'}">
           ${m.ativa !== false ? getM3Icon('check_circle', 'm3-icon-sm') + ' <span>Ativa</span>' : getM3Icon('cancel', 'm3-icon-sm') + ' <span>Inativa</span>'}
         </button>
-        <button class="btn btn-danger btn-sm" onclick="excluirMoldeDespesa('${m.id}')" title="Excluir do cadastro central" aria-label="Remover conta do molde central">${getM3Icon("delete")} <span>Remover</span></button>
+        <button class="btn btn-danger btn-sm" onclick="excluirMoldeDespesa('${escapeAttrId(m.id)}')" title="Excluir do cadastro central" aria-label="Remover conta do molde central">${getM3Icon("delete")} <span>Remover</span></button>
       </div>
     </div>
   `).join("");
@@ -7556,7 +7738,7 @@ function salvarNovoMoldeDespesa(e) {
   const despMes = obterDespesasDoMes(compAtual);
   if (!despMes.some(d => d.moldeId === novoItem.id || d.descricao.toLowerCase() === desc.toLowerCase())) {
     despMes.push({
-      id: "d_" + compAtual.replace("-", "") + "_" + Math.random().toString(36).substring(2, 8),
+      id: "d_" + sanitizarId(compAtual, "mes").replace(/-/g, "") + "_" + Math.random().toString(36).substring(2, 8),
       moldeId: novoItem.id,
       descricao: desc,
       valor: val,
@@ -7698,7 +7880,7 @@ function abrirModalQuitarDespesa(id) {
   sel.innerHTML = `
     <option value="">Apenas marcar como paga (sem debitar de nenhuma conta)</option>
     ${appState.bancos.map(b => `
-      <option value="${b.id}">${escapeHtml(b.nome)} (Saldo: ${fmtBRL(b.saldo)})</option>
+      <option value="${escapeAttrId(b.id)}">${escapeHtml(b.nome)} (Saldo: ${fmtBRL(b.saldo)})</option>
     `).join("")}
   `;
 
@@ -7789,7 +7971,7 @@ function recarregarMoldeParaMesAtual() {
     const jaExiste = despMes.some(d => d.moldeId === m.id || d.descricao.toLowerCase() === m.descricao.toLowerCase());
     if (!jaExiste) {
       despMes.push({
-        id: "d_" + compAtual.replace("-", "") + "_" + Math.random().toString(36).substring(2, 8),
+        id: "d_" + sanitizarId(compAtual, "mes").replace(/-/g, "") + "_" + Math.random().toString(36).substring(2, 8),
         moldeId: m.id,
         descricao: m.descricao,
         valor: Number(m.valorPadrao) || 0,

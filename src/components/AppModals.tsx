@@ -115,9 +115,9 @@ interface AppModalsProps {
   vaultConfig: VaultSessionConfig;
   lastGeneratedRecoveryKey: string | null;
   onActivateVault: (password: string, recoveryKey: string, autoLockMin: number) => Promise<void>;
-  onDeactivateVault: () => void;
+  onDeactivateVault: (currentPassword: string) => Promise<boolean>;
   onUpdateVaultAutoLock: (autoLockMin: number) => void;
-  onLockVaultNow: () => void;
+  onLockVaultNow: () => void | Promise<void>;
   onExportVault: () => void;
   onImportVault: (file: File, secret: string) => Promise<{ ok: boolean; error?: string }>;
 }
@@ -214,6 +214,9 @@ export const AppModals: React.FC<AppModalsProps> = ({
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [vaultCopiedKey, setVaultCopiedKey] = useState(false);
   const [confirmDeactivateVault, setConfirmDeactivateVault] = useState(false);
+  const [deactivateVaultSecret, setDeactivateVaultSecret] = useState('');
+  const [deactivateVaultError, setDeactivateVaultError] = useState<string | null>(null);
+  const [deactivateVaultBusy, setDeactivateVaultBusy] = useState(false);
   const [importVaultFile, setImportVaultFile] = useState<File | null>(null);
   const [importVaultSecret, setImportVaultSecret] = useState('');
   const [importVaultError, setImportVaultError] = useState<string | null>(null);
@@ -371,6 +374,9 @@ export const AppModals: React.FC<AppModalsProps> = ({
       setVaultError(null);
       setVaultCopiedKey(false);
       setConfirmDeactivateVault(false);
+      setDeactivateVaultSecret('');
+      setDeactivateVaultError(null);
+      setDeactivateVaultBusy(false);
       setImportVaultFile(null);
       setImportVaultSecret('');
       setImportVaultError(null);
@@ -410,6 +416,18 @@ export const AppModals: React.FC<AppModalsProps> = ({
     state.configPagamento,
     cxFire,
   ]);
+
+  useEffect(() => {
+    if (activeModal !== 'vaultSecurity') {
+      setVaultPwd('');
+      setVaultPwdConfirm('');
+      setImportVaultSecret('');
+      setDeactivateVaultSecret('');
+      setDeactivateVaultError(null);
+      setDeactivateVaultBusy(false);
+      setConfirmDeactivateVault(false);
+    }
+  }, [activeModal]);
 
   const targetCaixinha = state.caixinhas.find((c) => c.id === selectedId);
   const despesasMes = state.despesasPorMes[state.competenciaAtual] || [];
@@ -2035,7 +2053,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   Esta chave permite recuperar seu cofre caso esqueça a senha mestra. Ela não é salva em nenhum servidor.
                 </p>
                 <div className="flex items-center gap-2">
-                  <code className="flex-1 bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 text-xs font-mono font-bold text-slate-900 dark:text-white select-all tracking-wider">
+                  <code className="flex-1 bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-800 rounded-lg px-3 py-2 text-xs font-mono font-bold text-slate-900 dark:text-white select-all tracking-wider privacy-val">
                     {lastGeneratedRecoveryKey}
                   </code>
                   <button
@@ -2207,8 +2225,8 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      onLockVaultNow();
                       onClose();
+                      void onLockVaultNow();
                     }}
                     className="min-h-[44px] px-3 py-2 rounded-lg bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                   >
@@ -2229,36 +2247,102 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   {!confirmDeactivateVault ? (
                     <button
                       type="button"
-                      onClick={() => setConfirmDeactivateVault(true)}
-                      className="text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
+                      onClick={() => {
+                        setConfirmDeactivateVault(true);
+                        setDeactivateVaultSecret('');
+                        setDeactivateVaultError(null);
+                      }}
+                      className="min-h-[44px] inline-flex items-center text-xs font-semibold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
                     >
                       Desativar Cofre (salvar dados sem criptografia)
                     </button>
                   ) : (
-                    <div className="flex items-center justify-between gap-2 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 rounded-lg p-2.5">
-                      <span className="text-xs text-rose-800 dark:text-rose-300 font-semibold">
-                        Remover criptografia local?
-                      </span>
-                      <div className="flex items-center gap-1.5">
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        if (!deactivateVaultSecret.trim()) {
+                          setDeactivateVaultError(
+                            'Informe sua Senha Mestra ou Recovery Key atual para confirmar a desativação.'
+                          );
+                          return;
+                        }
+                        setDeactivateVaultBusy(true);
+                        setDeactivateVaultError(null);
+                        try {
+                          const ok = await onDeactivateVault(deactivateVaultSecret);
+                          if (ok) {
+                            setDeactivateVaultSecret('');
+                            setConfirmDeactivateVault(false);
+                          } else {
+                            setDeactivateVaultError(
+                              'Não foi possível desativar o cofre. A senha mestra ou Recovery Key informada está incorreta. Verifique a credencial e tente novamente.'
+                            );
+                          }
+                        } finally {
+                          setDeactivateVaultBusy(false);
+                        }
+                      }}
+                      className="space-y-2.5 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800 rounded-lg p-3"
+                    >
+                      <p className="text-xs text-rose-800 dark:text-rose-300 font-semibold">
+                        Remover criptografia local? Confirme sua credencial atual para salvar os dados sem proteção do cofre.
+                      </p>
+                      <div>
+                        <label
+                          htmlFor="vault-deactivate-secret"
+                          className="text-xs font-semibold text-rose-900 dark:text-rose-200 block mb-1"
+                        >
+                          Senha Mestra ou Recovery Key atual
+                        </label>
+                        <input
+                          id="vault-deactivate-secret"
+                          type="password"
+                          autoComplete="current-password"
+                          required
+                          disabled={deactivateVaultBusy}
+                          aria-invalid={Boolean(deactivateVaultError)}
+                          aria-describedby={deactivateVaultError ? 'vault-deactivate-error' : undefined}
+                          value={deactivateVaultSecret}
+                          onChange={(e) => {
+                            setDeactivateVaultSecret(e.target.value);
+                            if (deactivateVaultError) setDeactivateVaultError(null);
+                          }}
+                          placeholder="Digite sua senha atual ou Recovery Key..."
+                          className="w-full bg-white dark:bg-slate-900 border border-rose-200 dark:border-rose-800 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-rose-500"
+                        />
+                      </div>
+                      {deactivateVaultError && (
+                        <p
+                          id="vault-deactivate-error"
+                          role="alert"
+                          className="text-xs font-semibold text-rose-700 dark:text-rose-300 flex items-center gap-1.5"
+                        >
+                          <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                          <span>{deactivateVaultError}</span>
+                        </p>
+                      )}
+                      <div className="flex items-center justify-end gap-2">
                         <button
                           type="button"
-                          onClick={() => setConfirmDeactivateVault(false)}
-                          className="px-2.5 py-1 rounded border border-slate-300 dark:border-slate-700 text-xs font-semibold cursor-pointer"
+                          disabled={deactivateVaultBusy}
+                          onClick={() => {
+                            setConfirmDeactivateVault(false);
+                            setDeactivateVaultSecret('');
+                            setDeactivateVaultError(null);
+                          }}
+                          className="min-h-[44px] px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
                         >
                           Cancelar
                         </button>
                         <button
-                          type="button"
-                          onClick={() => {
-                            onDeactivateVault();
-                            setConfirmDeactivateVault(false);
-                          }}
-                          className="px-2.5 py-1 rounded bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold cursor-pointer"
+                          type="submit"
+                          disabled={deactivateVaultBusy || !deactivateVaultSecret.trim()}
+                          className="min-h-[44px] px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
                         >
-                          Desativar
+                          {deactivateVaultBusy ? 'Validando...' : 'Desativar Cofre'}
                         </button>
                       </div>
-                    </div>
+                    </form>
                   )}
                 </div>
               </div>

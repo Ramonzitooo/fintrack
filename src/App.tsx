@@ -8,6 +8,7 @@ import {
   getLocalDateKey,
   getLocalMonthKey,
   loadAppStateDetailed,
+  MAX_BACKUP_FILE_BYTES,
   normalizeState,
   safeGetStorageItem,
   safeJsonParse,
@@ -29,8 +30,10 @@ import {
   executeGoalTransfer,
   ExpenseItem,
   ExtraIncomeItem,
+  fromCents,
   generateInstallmentExpenses,
   getNextPaydayInfo,
+  MAX_SAFE_MONEY,
   payExpenseInList,
   receiveSalary,
   refundExpenseInList,
@@ -38,14 +41,18 @@ import {
   subMoney,
   sumMoney,
   syncTemplatesToMonth,
+  toCents,
 } from './utils/financeMath';
 import {
+  createVaultSession,
   decryptVaultPayload,
-  encryptVaultPayload,
+  encryptWithVaultSession,
   isEncryptedVaultEnvelope,
   loadVaultSessionConfig,
   saveVaultSessionConfig,
-  VaultEnvelope,
+  unlockVaultWithSession,
+  VAULT_SESSION_CONFIG_KEY,
+  VaultSession,
   VaultSessionConfig,
 } from './utils/cryptoVault';
 import { OverviewTab } from './components/OverviewTab';
@@ -77,7 +84,16 @@ const genId = (prefix: string) =>
   `${prefix}_${crypto.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
 
 const maskMonetaryText = (message: string) =>
-  message.replace(/R\$\s*-?[\d.,]+/g, 'R$ •••••');
+  message.replace(/(?:[-−]\s*)?R\$\s*(?:[-−]\s*)?\d+(?:[.,]\d+)*/g, 'R$ •••••');
+
+const purgePlaintextBackups = () => {
+  try {
+    localStorage.removeItem(`${STORAGE_KEY}_backup`);
+    localStorage.removeItem(`${STORAGE_KEY}_corrupt_backup`);
+  } catch {
+    // Ignora indisponibilidade de storage
+  }
+};
 
 export default function App() {
   const [initialLoad] = useState(() => loadAppStateDetailed());
@@ -112,10 +128,14 @@ export default function App() {
   const mobileTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const skipSaveRef = useRef<boolean>(initialLoad.status === 'vault_locked');
   const lastSaveErrorRef = useRef<string | null>(null);
-  const vaultSecretRef = useRef<string | null>(null);
-  const vaultRecoveryKeyRef = useRef<string | null>(null);
-  const lastVaultEnvelopeRef = useRef<VaultEnvelope | null>(null);
+  const vaultSessionRef = useRef<VaultSession | null>(null);
   const encryptSeqRef = useRef<number>(0);
+  const latestStateRef = useRef<AppState>(state);
+  const dirtyVaultPersistRef = useRef<boolean>(false);
+  const lastActivityAtRef = useRef<number>(Date.now());
+  const vaultActiveRef = useRef<boolean>(vaultActive);
+  const isVaultLockedRef = useRef<boolean>(isVaultLocked);
+  const isLockingRef = useRef<boolean>(false);
 
   const showToast = useCallback(
     (message: string, onUndo?: () => void) => {
@@ -127,18 +147,59 @@ export default function App() {
     [privacyMode]
   );
 
-  const lockVaultNow = useCallback(() => {
-    vaultSecretRef.current = null;
-    vaultRecoveryKeyRef.current = null;
-    encryptSeqRef.current += 1;
-    skipSaveRef.current = true;
-    setState(structuredClone(DEFAULT_STATE));
-    setActiveModal(null);
-    setQuickEditConfig(null);
-    setToast(null);
-    setUnlockSecret('');
-    setUnlockError(null);
-    setIsVaultLocked(true);
+  useEffect(() => {
+    latestStateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    vaultActiveRef.current = vaultActive;
+  }, [vaultActive]);
+
+  useEffect(() => {
+    isVaultLockedRef.current = isVaultLocked;
+  }, [isVaultLocked]);
+
+  const lockVaultNow = useCallback(async (options?: { skipFlush?: boolean }) => {
+    if (isLockingRef.current) return;
+    isLockingRef.current = true;
+    try {
+      encryptSeqRef.current += 1;
+      if (
+        !options?.skipFlush &&
+        vaultActiveRef.current &&
+        vaultSessionRef.current &&
+        dirtyVaultPersistRef.current
+      ) {
+        try {
+          const envelope = await encryptWithVaultSession(
+            latestStateRef.current,
+            vaultSessionRef.current
+          );
+          safeSetStorageItem(STORAGE_KEY, JSON.stringify(envelope));
+        } catch {
+          // Fail-closed: mesmo se o flush final falhar, conclui o bloqueio e limpa a memória.
+        }
+      }
+      vaultSessionRef.current = null;
+      dirtyVaultPersistRef.current = false;
+      skipSaveRef.current = true;
+      isVaultLockedRef.current = true;
+      const emptyState = structuredClone(DEFAULT_STATE);
+      latestStateRef.current = emptyState;
+      setLastGeneratedRecoveryKey(null);
+      setState(emptyState);
+      setSelectedId(null);
+      setActiveModal(null);
+      setQuickEditConfig(null);
+      setToast(null);
+      setUnlockSecret('');
+      setUnlockShowSecret(false);
+      setUnlockError(null);
+      setStorageWarning(null);
+      setIsVaultLocked(true);
+    } finally {
+      isLockingRef.current = false;
+    }
   }, []);
 
   // Alert on initial corrupt storage
@@ -148,27 +209,61 @@ export default function App() {
     }
   }, [initialLoad.status, showToast]);
 
-  // Auto-lock por inatividade quando o cofre está ativo e desbloqueado
+  // Auto-lock por inatividade quando o cofre está ativo e desbloqueado (incluindo despertar pós-suspensão SO)
   useEffect(() => {
     if (!vaultActive || isVaultLocked || vaultConfig.autoLockMin <= 0) return;
     const timeoutMs = vaultConfig.autoLockMin * 60 * 1000;
-    let timerId = window.setTimeout(lockVaultNow, timeoutMs);
-    let lastResetAt = Date.now();
+    lastActivityAtRef.current = Date.now();
+    let timerId = 0;
 
-    const resetTimer = () => {
-      const now = Date.now();
-      if (now - lastResetAt < 1000) return;
-      lastResetAt = now;
+    const scheduleRemaining = () => {
       window.clearTimeout(timerId);
-      timerId = window.setTimeout(lockVaultNow, timeoutMs);
+      const elapsed = Date.now() - lastActivityAtRef.current;
+      const remaining = timeoutMs - elapsed;
+      if (remaining <= 0) {
+        void lockVaultNow();
+        return;
+      }
+      timerId = window.setTimeout(() => {
+        if (Date.now() - lastActivityAtRef.current >= timeoutMs) {
+          void lockVaultNow();
+        } else {
+          scheduleRemaining();
+        }
+      }, remaining);
     };
 
-    const events: (keyof WindowEventMap)[] = ['mousemove', 'mousedown', 'keydown', 'touchstart', 'scroll'];
-    events.forEach((ev) => window.addEventListener(ev, resetTimer, { passive: true }));
+    scheduleRemaining();
+
+    const recordActivity = () => {
+      const now = Date.now();
+      if (now - lastActivityAtRef.current >= timeoutMs) {
+        void lockVaultNow();
+        return;
+      }
+      if (now - lastActivityAtRef.current < 1000) return;
+      lastActivityAtRef.current = now;
+      scheduleRemaining();
+    };
+
+    const handleWakeCheck = () => {
+      if (Date.now() - lastActivityAtRef.current >= timeoutMs) {
+        void lockVaultNow();
+      } else if (document.visibilityState !== 'hidden') {
+        scheduleRemaining();
+      }
+    };
+
+    const activityEvents: (keyof WindowEventMap)[] = ['pointerdown', 'keydown'];
+    activityEvents.forEach((ev) => window.addEventListener(ev, recordActivity, { passive: true }));
+    document.addEventListener('visibilitychange', handleWakeCheck);
+    window.addEventListener('focus', handleWakeCheck);
 
     return () => {
       window.clearTimeout(timerId);
-      events.forEach((ev) => window.removeEventListener(ev, resetTimer));
+      activityEvents.forEach((ev) => window.removeEventListener(ev, recordActivity));
+      document.removeEventListener('visibilitychange', handleWakeCheck);
+      window.removeEventListener('focus', handleWakeCheck);
     };
   }, [vaultActive, isVaultLocked, vaultConfig.autoLockMin, lockVaultNow]);
 
@@ -190,23 +285,24 @@ export default function App() {
     }
     if (skipSaveRef.current) {
       skipSaveRef.current = false;
+      dirtyVaultPersistRef.current = false;
       return;
     }
 
-    if (vaultActive && vaultSecretRef.current) {
-      const secret = vaultSecretRef.current;
-      const recoveryKey = vaultRecoveryKeyRef.current ?? undefined;
+    if (vaultActive) {
+      const session = vaultSessionRef.current;
+      if (!session) return;
+      dirtyVaultPersistRef.current = true;
       const seq = ++encryptSeqRef.current;
+      const snapshotToPersist = state;
       const timer = window.setTimeout(async () => {
         try {
-          const envelope = await encryptVaultPayload(state, secret, recoveryKey);
+          const envelope = await encryptWithVaultSession(snapshotToPersist, session);
           if (seq !== encryptSeqRef.current) return;
-          if (!recoveryKey && lastVaultEnvelopeRef.current?.recoveryWrapped) {
-            envelope.recoveryWrapped = lastVaultEnvelopeRef.current.recoveryWrapped;
-          }
-          lastVaultEnvelopeRef.current = envelope;
           const ok = safeSetStorageItem(STORAGE_KEY, JSON.stringify(envelope));
-          if (!ok) {
+          if (ok) {
+            dirtyVaultPersistRef.current = false;
+          } else {
             showToast('Não foi possível salvar o cofre cifrado no armazenamento local.');
           }
         } catch (err) {
@@ -217,6 +313,7 @@ export default function App() {
       return () => window.clearTimeout(timer);
     }
 
+    dirtyVaultPersistRef.current = false;
     const res = saveAppState(state);
     if (!res.ok) {
       const errMsg = res.error || 'Erro ao salvar dados localmente.';
@@ -237,15 +334,32 @@ export default function App() {
   // Cross-tab synchronization
   useEffect(() => {
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === STORAGE_KEY) {
+      if (e.key === STORAGE_KEY || e.key === null) {
+        if (isVaultLockedRef.current) {
+          return;
+        }
         const loaded = loadAppStateDetailed();
-        if (loaded.status === 'ok') {
+        if (loaded.status === 'vault_locked') {
+          vaultActiveRef.current = true;
+          setVaultActive(true);
+          void lockVaultNow({ skipFlush: true });
+        } else if (loaded.status === 'ok') {
+          if (vaultActiveRef.current) {
+            vaultSessionRef.current = null;
+            vaultActiveRef.current = false;
+            dirtyVaultPersistRef.current = false;
+            setVaultActive(false);
+            setVaultConfig(loadVaultSessionConfig());
+          }
           skipSaveRef.current = true;
+          latestStateRef.current = loaded.state;
           setState(loaded.state);
           setStorageWarning(null);
-        } else if (loaded.status === 'vault_locked' || loaded.status === 'corrupt') {
-          setStorageWarning(loaded.status);
+        } else if (loaded.status === 'corrupt') {
+          setStorageWarning('corrupt');
         }
+      } else if (e.key === VAULT_SESSION_CONFIG_KEY) {
+        setVaultConfig(loadVaultSessionConfig());
       } else if (e.key === 'FINTRACK_PRIVACIDADE') {
         setPrivacyMode(e.newValue === '1');
       } else if (e.key === 'FINTRACK_M3_THEME') {
@@ -254,7 +368,7 @@ export default function App() {
     };
     window.addEventListener('storage', handleStorage);
     return () => window.removeEventListener('storage', handleStorage);
-  }, []);
+  }, [lockVaultNow]);
 
   // Sync privacy and dark classes
   useEffect(() => {
@@ -277,6 +391,7 @@ export default function App() {
   // Global keyboard shortcuts (Ctrl+K, N, P)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (isVaultLocked) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setActiveModal((prev) => (prev === 'cmdk' ? null : 'cmdk'));
@@ -303,7 +418,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeModal]);
+  }, [activeModal, isVaultLocked]);
 
   const paydayInfo = getNextPaydayInfo(state.configPagamento);
 
@@ -999,21 +1114,39 @@ export default function App() {
       if (!isEncryptedVaultEnvelope(parsed)) {
         throw new Error('Dados locais não estão no formato de cofre cifrado.');
       }
-      const decrypted = await decryptVaultPayload<unknown>(parsed, unlockSecret);
-      const normalized = normalizeState(decrypted);
-      vaultSecretRef.current = unlockSecret;
-      vaultRecoveryKeyRef.current = null;
-      if ('salt' in parsed && typeof parsed.salt === 'string') {
-        lastVaultEnvelopeRef.current = parsed as VaultEnvelope;
+      const res = await unlockVaultWithSession<unknown>(parsed, unlockSecret);
+      const normalized = normalizeState(res.data);
+      vaultSessionRef.current = res.session;
+      let migrationPersistFailed = false;
+      if (res.migratedFromLegacy) {
+        const migratedEnvelope = await encryptWithVaultSession(normalized, res.session);
+        const saved = safeSetStorageItem(STORAGE_KEY, JSON.stringify(migratedEnvelope));
+        if (!saved) {
+          migrationPersistFailed = true;
+        } else {
+          purgePlaintextBackups();
+        }
       }
       skipSaveRef.current = true;
+      dirtyVaultPersistRef.current = false;
+      latestStateRef.current = normalized;
+      vaultActiveRef.current = true;
+      isVaultLockedRef.current = false;
+      lastActivityAtRef.current = Date.now();
       setState(normalized);
       setVaultActive(true);
       setIsVaultLocked(false);
       setStorageWarning(null);
       setUnlockSecret('');
+      setUnlockShowSecret(false);
       setVaultConfig(saveVaultSessionConfig({ enabled: true, autoLockMin: vaultConfig.autoLockMin }));
-      showToast('Cofre desbloqueado com sucesso.');
+      showToast(
+        migrationPersistFailed
+          ? 'Cofre desbloqueado, mas não foi possível persistir a migração v4.0 localmente.'
+          : res.migratedFromLegacy
+            ? 'Cofre legado v3.4 desbloqueado e migrado para v4.0 com sucesso.'
+            : 'Cofre desbloqueado com sucesso.'
+      );
     } catch (err) {
       setUnlockError(
         err instanceof Error ? err.message : 'Credencial incorreta ou dados corrompidos.'
@@ -1024,14 +1157,18 @@ export default function App() {
   };
 
   const handleActivateVault = async (password: string, recoveryKey: string, autoLockMin: number) => {
-    const envelope = await encryptVaultPayload(state, password, recoveryKey);
+    const { envelope, session } = await createVaultSession(latestStateRef.current, password, recoveryKey);
+    encryptSeqRef.current += 1;
     const saved = safeSetStorageItem(STORAGE_KEY, JSON.stringify(envelope));
     if (!saved) {
       throw new Error('Não foi possível gravar o cofre no armazenamento local (verifique espaço disponível).');
     }
-    vaultSecretRef.current = password;
-    vaultRecoveryKeyRef.current = recoveryKey;
-    lastVaultEnvelopeRef.current = envelope;
+    purgePlaintextBackups();
+    vaultSessionRef.current = session;
+    vaultActiveRef.current = true;
+    dirtyVaultPersistRef.current = false;
+    skipSaveRef.current = true;
+    lastActivityAtRef.current = Date.now();
     setVaultConfig(saveVaultSessionConfig({ enabled: true, autoLockMin }));
     setVaultActive(true);
     setLastGeneratedRecoveryKey(recoveryKey);
@@ -1039,16 +1176,50 @@ export default function App() {
     showToast('Cofre Zero-Knowledge AES-256-GCM ativado!');
   };
 
-  const handleDeactivateVault = () => {
-    vaultSecretRef.current = null;
-    vaultRecoveryKeyRef.current = null;
-    lastVaultEnvelopeRef.current = null;
+  const handleDeactivateVault = async (currentPassword: string): Promise<boolean> => {
+    if (!currentPassword || !currentPassword.trim()) {
+      return false;
+    }
+    const raw = safeGetStorageItem(STORAGE_KEY);
+    if (!raw) {
+      return false;
+    }
+    let parsed: unknown;
+    try {
+      parsed = safeJsonParse(raw);
+    } catch {
+      return false;
+    }
+    if (!isEncryptedVaultEnvelope(parsed)) {
+      return false;
+    }
+
+    try {
+      await decryptVaultPayload(parsed, currentPassword);
+    } catch {
+      return false;
+    }
+
+    if (isVaultLockedRef.current || !vaultSessionRef.current) {
+      return false;
+    }
+
     encryptSeqRef.current += 1;
+    const saved = safeSetStorageItem(STORAGE_KEY, JSON.stringify(latestStateRef.current));
+    if (!saved) {
+      showToast('Não foi possível salvar os dados sem criptografia no armazenamento local.');
+      return false;
+    }
+
+    vaultSessionRef.current = null;
+    vaultActiveRef.current = false;
+    dirtyVaultPersistRef.current = false;
+    skipSaveRef.current = true;
     setLastGeneratedRecoveryKey(null);
     setVaultActive(false);
     setVaultConfig(saveVaultSessionConfig({ enabled: false, autoLockMin: vaultConfig.autoLockMin }));
-    safeSetStorageItem(STORAGE_KEY, JSON.stringify(state));
     showToast('Cofre desativado. Os dados agora são salvos localmente sem criptografia.');
+    return true;
   };
 
   const handleUpdateVaultAutoLock = (autoLockMin: number) => {
@@ -1062,19 +1233,12 @@ export default function App() {
   };
 
   const handleExportVault = async () => {
-    if (!vaultSecretRef.current) {
+    if (!vaultSessionRef.current) {
       showToast('Ative ou desbloqueie o cofre para exportar um backup cifrado .vault.');
       return;
     }
     try {
-      const envelope = await encryptVaultPayload(
-        state,
-        vaultSecretRef.current,
-        vaultRecoveryKeyRef.current ?? undefined
-      );
-      if (!vaultRecoveryKeyRef.current && lastVaultEnvelopeRef.current?.recoveryWrapped) {
-        envelope.recoveryWrapped = lastVaultEnvelopeRef.current.recoveryWrapped;
-      }
+      const envelope = await encryptWithVaultSession(state, vaultSessionRef.current);
       const dataIso = getLocalDateKey();
       const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -1093,20 +1257,51 @@ export default function App() {
     file: File,
     secret: string
   ): Promise<{ ok: boolean; error?: string }> => {
+    if (file.size > MAX_BACKUP_FILE_BYTES) {
+      const maxMb = Math.round(MAX_BACKUP_FILE_BYTES / (1024 * 1024));
+      return {
+        ok: false,
+        error: `Não foi possível importar o cofre .vault. O arquivo excede o limite máximo de ${maxMb} MB. Selecione um backup .vault válido exportado pelo FinTrack.`,
+      };
+    }
     try {
       const rawText = await file.text();
       const parsed = safeJsonParse(rawText);
       if (!isEncryptedVaultEnvelope(parsed)) {
         return { ok: false, error: 'O arquivo selecionado não é um envelope .vault válido (v4.0 ou v3.4).' };
       }
-      const decrypted = await decryptVaultPayload<unknown>(parsed, secret);
-      const normalized = normalizeState(decrypted);
-      const snapshot = structuredClone(state);
+      const res = await unlockVaultWithSession<unknown>(parsed, secret);
+      if (isVaultLockedRef.current) {
+        return { ok: false, error: 'O cofre foi trancado durante a importação.' };
+      }
+      const normalized = normalizeState(res.data);
+      const envelope = await encryptWithVaultSession(normalized, res.session);
+      encryptSeqRef.current += 1;
+      const saved = safeSetStorageItem(STORAGE_KEY, JSON.stringify(envelope));
+      if (!saved) {
+        return {
+          ok: false,
+          error: 'Não foi possível gravar o cofre cifrado no armazenamento local (verifique espaço disponível).',
+        };
+      }
+      purgePlaintextBackups();
+      vaultSessionRef.current = res.session;
+      vaultActiveRef.current = true;
+      isVaultLockedRef.current = false;
+      dirtyVaultPersistRef.current = false;
+      skipSaveRef.current = true;
+      latestStateRef.current = normalized;
+      lastActivityAtRef.current = Date.now();
+      setVaultConfig(saveVaultSessionConfig({ enabled: true, autoLockMin: vaultConfig.autoLockMin }));
+      setVaultActive(true);
+      setLastGeneratedRecoveryKey(null);
       setState(normalized);
       setStorageWarning(null);
-      showToast('Backup cifrado .vault importado e decifrado com sucesso!', () => {
-        setState(snapshot);
-      });
+      showToast(
+        res.migratedFromLegacy
+          ? 'Backup cifrado .vault v3.4 importado, migrado para v4.0 e protegido no cofre.'
+          : 'Backup cifrado .vault importado com sucesso! Cofre Zero-Knowledge ativado.'
+      );
       return { ok: true };
     } catch (err) {
       return {
@@ -1157,7 +1352,12 @@ export default function App() {
     valor: number;
     categoria: 'Impostos';
   }) => {
-    const safeValor = Math.max(0, Number(payload.valor) || 0);
+    const rawValor = Number(payload.valor);
+    if (!Number.isFinite(rawValor) || rawValor <= 0 || rawValor > MAX_SAFE_MONEY) {
+      showToast('Informe um valor de tributo válido (maior que zero e dentro do limite permitido) para lançar em Despesas.');
+      return;
+    }
+    const safeValor = fromCents(toCents(rawValor));
     if (safeValor <= 0) {
       showToast('Informe um valor de tributo maior que zero para lançar em Despesas.');
       return;
@@ -1967,6 +2167,13 @@ export default function App() {
         onExportJSON={handleExportJSON}
         onExportCSV={handleExportCSV}
         onImportJSON={(file) => {
+          if (file.size > MAX_BACKUP_FILE_BYTES) {
+            const maxMb = Math.round(MAX_BACKUP_FILE_BYTES / (1024 * 1024));
+            showToast(
+              `Não foi possível importar o backup JSON. O arquivo excede o limite máximo de ${maxMb} MB. Selecione um arquivo JSON válido exportado pelo FinTrack.`
+            );
+            return;
+          }
           const reader = new FileReader();
           reader.onload = (ev) => {
             const rawText = String(ev.target?.result || '');
@@ -1992,6 +2199,7 @@ export default function App() {
         onResetFactory={() => {
           const snapshot = structuredClone(state);
           const fresh = structuredClone(DEFAULT_STATE);
+          purgePlaintextBackups();
           setState(fresh);
           setStorageWarning(null);
           showToast('Todos os dados foram zerados.', () => {
@@ -2004,7 +2212,7 @@ export default function App() {
         onActivateVault={handleActivateVault}
         onDeactivateVault={handleDeactivateVault}
         onUpdateVaultAutoLock={handleUpdateVaultAutoLock}
-        onLockVaultNow={lockVaultNow}
+        onLockVaultNow={() => lockVaultNow()}
         onExportVault={handleExportVault}
         onImportVault={handleImportVault}
       />

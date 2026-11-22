@@ -29,6 +29,8 @@ import {
   shouldDismissSheetOnRelease,
   toCents,
   fromCents,
+  MAX_SAFE_MONEY,
+  MAX_INSTALLMENTS,
   addMoney,
   subMoney,
   sumMoney,
@@ -37,6 +39,9 @@ import {
   simulateDebtPayoff,
 } from './financeMath.ts';
 import {
+  MAX_BACKUP_FILE_BYTES,
+  MAX_COLLECTION_ITEMS,
+  MAX_STRING_LEN,
   sanitizeCsvCell,
   safeJsonParse,
   normalizeState,
@@ -688,6 +693,334 @@ test('29. storage normalizeState and validateImportJson handle receitasPorMes an
     assert.equal(importCheck.state.receitasPorMes['2026-11'][0].valor, 300);
   }
 });
+
+test('30. ALTO-04: toCents and fromCents prevent overflow/Infinity while preserving valid high monetary values', () => {
+  assert.equal(MAX_SAFE_MONEY, 9_000_000_000_000);
+  assert.equal(MAX_INSTALLMENTS, 600);
+
+  // Overflow e valores não-finitos devem retornar 0 (nunca Infinity/-Infinity/NaN)
+  assert.equal(toCents(1e308), 0);
+  assert.equal(toCents(-1e308), 0);
+  assert.equal(toCents(Infinity), 0);
+  assert.equal(toCents(-Infinity), 0);
+  assert.equal(toCents(NaN), 0);
+  assert.equal(toCents(MAX_SAFE_MONEY + 1), 0);
+  assert.equal(toCents(-(MAX_SAFE_MONEY + 1)), 0);
+
+  assert.equal(fromCents(Infinity), 0);
+  assert.equal(fromCents(-Infinity), 0);
+  assert.equal(fromCents(NaN), 0);
+  assert.equal(fromCents(MAX_SAFE_MONEY * 100 + 1), 0);
+  assert.equal(fromCents(-(MAX_SAFE_MONEY * 100 + 1)), 0);
+
+  // Valores altos válidos dentro de MAX_SAFE_MONEY são preservados com precisão inteira exata
+  assert.equal(toCents(1_000_000_000.55), 100_000_000_055);
+  assert.equal(fromCents(100_000_000_055), 1_000_000_000.55);
+  assert.equal(toCents(-1_000_000_000.55), -100_000_000_055);
+  assert.equal(fromCents(-100_000_000_055), -1_000_000_000.55);
+  assert.equal(toCents(MAX_SAFE_MONEY), 900_000_000_000_000);
+  assert.ok(Number.isSafeInteger(toCents(MAX_SAFE_MONEY)));
+  assert.equal(fromCents(MAX_SAFE_MONEY * 100), MAX_SAFE_MONEY);
+});
+
+test('31. ALTO-04: parseQuickExpenseCommand rejects >500 chars and ignores 1e307 / >MAX_SAFE_MONEY candidates', () => {
+  // Rejeita entradas acima de 500 caracteres
+  const over500 = `Almoço ${'a'.repeat(500)} 45,90 pix`;
+  assert.ok(over500.length > 500);
+  assert.equal(parseQuickExpenseCommand(over500), null);
+  assert.equal(parseQuickExpenseCommand('x'.repeat(501)), null);
+
+  // Ignora candidato 1e307 (308 dígitos, < 500 chars) que antes causava 1e307 * 100 === Infinity
+  const cmd1e307 = `Almoço 1${'0'.repeat(307)} pix`;
+  assert.ok(cmd1e307.length <= 500);
+  assert.equal(parseQuickExpenseCommand(cmd1e307), null);
+
+  // Ignora candidato > MAX_SAFE_MONEY
+  assert.equal(parseQuickExpenseCommand('Almoço 99999999999999 pix'), null);
+
+  // Quando há candidato válido junto com 1e307, ignora o overflow e preserva o candidato válido
+  const mixed = parseQuickExpenseCommand(`Almoço 45,90 1${'0'.repeat(307)} pix`);
+  assert.ok(mixed !== null);
+  assert.ok(Number.isFinite(mixed.valor));
+  assert.equal(mixed.valor, 45.9);
+
+  // Notação científica literal também nunca pode retornar Infinity
+  const sci = parseQuickExpenseCommand('Almoço 1e307');
+  if (sci !== null) {
+    assert.ok(Number.isFinite(sci.valor) && sci.valor <= MAX_SAFE_MONEY);
+  }
+});
+
+test('32. ALTO-04: simulateCashVsInstallments and generateInstallmentExpenses enforce MAX_INSTALLMENTS and block DoS/overflow', () => {
+  // simulateCashVsInstallments com 1e9 parcelas completa instantaneamente com teto <= 600
+  const t0 = performance.now();
+  const sim = simulateCashVsInstallments(1000, 100, 1e9, 1);
+  const simElapsedMs = performance.now() - t0;
+
+  assert.ok(simElapsedMs < 200, `simulateCashVsInstallments demorou ${simElapsedMs}ms`);
+  assert.equal(sim.installmentValue, Math.round((1000 / MAX_INSTALLMENTS) * 100) / 100);
+  assert.ok(Number.isFinite(sim.cashPrice));
+  assert.ok(Number.isFinite(sim.immediateDiscountValue));
+  assert.ok(Number.isFinite(sim.totalInterestEarned));
+  assert.ok(Number.isFinite(sim.finalCdiBalanceAfterInstallments));
+  assert.ok(Number.isFinite(sim.netAdvantageForInstallments));
+  assert.ok(Number.isFinite(sim.breakEvenDiscountPct));
+
+  // Entradas não-finitas ou acima de MAX_SAFE_MONEY em simulateCashVsInstallments
+  const simOverflow = simulateCashVsInstallments(1e308, Infinity, Infinity, Infinity);
+  assert.equal(simOverflow.cashPrice, 0);
+  assert.equal(simOverflow.installmentValue, 0);
+  assert.ok(Number.isFinite(simOverflow.finalCdiBalanceAfterInstallments));
+
+  // generateInstallmentExpenses com totalParcelas: 1e9 completa instantaneamente com <= 600 parcelas
+  const t1 = performance.now();
+  const generated = generateInstallmentExpenses({
+    baseId: 'dos_guard',
+    descricao: 'Teste Teto',
+    valorTotal: 1000,
+    totalParcelas: 1e9,
+    competenciaInicial: '2026-11',
+    categoria: 'Outros',
+    vencimentoDia: 10,
+  });
+  const genElapsedMs = performance.now() - t1;
+
+  const monthKeys = Object.keys(generated);
+  assert.ok(genElapsedMs < 200, `generateInstallmentExpenses demorou ${genElapsedMs}ms`);
+  assert.equal(monthKeys.length, MAX_INSTALLMENTS);
+  const allInstallments = monthKeys.flatMap((k) => generated[k]);
+  assert.equal(allInstallments.length, MAX_INSTALLMENTS);
+  assert.equal(allInstallments[0].totalParcelas, MAX_INSTALLMENTS);
+  assert.equal(sumMoney(allInstallments.map((i) => i.valor)), 1000);
+
+  // Rejeita valorTotal não-finito ou acima de MAX_SAFE_MONEY e totalParcelas não-finito
+  assert.deepEqual(
+    generateInstallmentExpenses({
+      baseId: 'inf_val',
+      descricao: 'Infinito',
+      valorTotal: Infinity,
+      totalParcelas: 12,
+      competenciaInicial: '2026-11',
+      categoria: 'Outros',
+      vencimentoDia: 10,
+    }),
+    {}
+  );
+  assert.deepEqual(
+    generateInstallmentExpenses({
+      baseId: 'over_val',
+      descricao: 'Acima do teto',
+      valorTotal: MAX_SAFE_MONEY + 1,
+      totalParcelas: 12,
+      competenciaInicial: '2026-11',
+      categoria: 'Outros',
+      vencimentoDia: 10,
+    }),
+    {}
+  );
+  assert.deepEqual(
+    generateInstallmentExpenses({
+      baseId: 'inf_parc',
+      descricao: 'Parcelas infinitas',
+      valorTotal: 1000,
+      totalParcelas: Infinity,
+      competenciaInicial: '2026-11',
+      categoria: 'Outros',
+      vencimentoDia: 10,
+    }),
+    {}
+  );
+});
+
+test('33. BAIXO-01: sanitizeCsvCell strips C0 control chars before checking formula prefixes (blocks \\x01=CMD bypass)', () => {
+  assert.equal(sanitizeCsvCell("\x01=CMD|' /C calc'!A0"), '"\'=CMD|\' /C calc\'!A0"');
+  assert.equal(sanitizeCsvCell('\x00+1+1'), '"\'+1+1"');
+  assert.equal(sanitizeCsvCell('\x07\x1F-SUM(A1:A2)'), '"\'-SUM(A1:A2)"');
+  assert.equal(sanitizeCsvCell('\x02\n@HYPERLINK("http://evil")'), '"\'@HYPERLINK(""http://evil"")"');
+  assert.equal(sanitizeCsvCell('\t=1+1'), '"\'=1+1"');
+  assert.equal(sanitizeCsvCell('  \x00|calc  '), '"\'|calc"');
+  assert.equal(sanitizeCsvCell('Alimentação R$ 45,90'), '"Alimentação R$ 45,90"');
+});
+
+test('34. MEDIO-02: validateImportJson rejects payloads exceeding MAX_BACKUP_FILE_BYTES immediately', () => {
+  assert.equal(MAX_BACKUP_FILE_BYTES, 10 * 1024 * 1024);
+  const oversizedPayload = `{"bancos":[{"id":"1","nome":"${'a'.repeat(MAX_BACKUP_FILE_BYTES)}"}]}`;
+  assert.ok(oversizedPayload.length > MAX_BACKUP_FILE_BYTES);
+
+  const t0 = performance.now();
+  const res = validateImportJson(oversizedPayload);
+  const elapsedMs = performance.now() - t0;
+
+  assert.equal(res.ok, false);
+  if (!res.ok) {
+    assert.match(res.error, /10\s*MB|limite/i);
+  }
+  assert.ok(elapsedMs < 100, `validateImportJson demorou ${elapsedMs}ms para rejeitar payload gigante`);
+});
+
+test('35. MEDIO-02: normalizeState clamps 1e308 to MAX_SAFE_MONEY, truncates/cleans Bidi strings, and caps collections/months/installments', () => {
+  assert.equal(MAX_COLLECTION_ITEMS, 2000);
+  assert.equal(MAX_STRING_LEN, 300);
+  const giantBidi = `Nubank\u202E\u2066\x00\x07${'X'.repeat(500)}`;
+
+  const giantBanks = Array.from({ length: MAX_COLLECTION_ITEMS + 250 }, (_, idx) => ({
+    id: `b_${idx}`,
+    nome: idx === 0 ? giantBidi : `Banco ${idx}`,
+    tipo: 'Conta Digital',
+    saldo: idx === 0 ? 1e308 : idx === 1 ? -1e308 : 100,
+    rendeJuros: true,
+    pctCDI: idx === 0 ? 1e308 : 100,
+  }));
+
+  const manyMonths: Record<string, any[]> = {};
+  for (let i = 0; i < 260; i++) {
+    const year = 2000 + Math.floor(i / 12);
+    const month = String((i % 12) + 1).padStart(2, '0');
+    const key = `${year}-${month}`;
+    manyMonths[key] =
+      i === 0
+        ? Array.from({ length: MAX_COLLECTION_ITEMS + 100 }, (_, j) => ({
+            id: `e_${j}`,
+            descricao: j === 0 ? giantBidi : `Item ${j}`,
+            valor: j === 0 ? 1e308 : 10,
+            diaVencimento: 10,
+            paga: false,
+            categoria: 'Outros',
+            parcelaAtual: 999999,
+            totalParcelas: 999999,
+          }))
+        : [{ id: `e_${i}`, descricao: 'Conta', valor: 50, diaVencimento: 10, paga: false, categoria: 'Outros' }];
+  }
+
+  const manyIncomeMonths: Record<string, any[]> = {};
+  for (let i = 0; i < 260; i++) {
+    const year = 2000 + Math.floor(i / 12);
+    const month = String((i % 12) + 1).padStart(2, '0');
+    const key = `${year}-${month}`;
+    manyIncomeMonths[key] =
+      i === 0
+        ? Array.from({ length: MAX_COLLECTION_ITEMS + 50 }, (_, j) => ({
+            id: `r_${j}`,
+            descricao: j === 0 ? giantBidi : `Rec ${j}`,
+            valor: j === 0 ? 1e308 : 20,
+            categoria: 'Serviços',
+            data: `${key}-05`,
+            recebida: true,
+          }))
+        : [{ id: `r_${i}`, descricao: 'Extra', valor: 10, categoria: 'Outros', data: `${key}-01`, recebida: false }];
+  }
+
+  const giantCaixinhas = Array.from({ length: MAX_COLLECTION_ITEMS + 50 }, (_, i) => ({
+    id: `cx_${i}`,
+    nome: i === 0 ? giantBidi : `Cx ${i}`,
+    saldo: i === 0 ? 1e308 : 10,
+    aporteMensal: i === 0 ? 1e308 : 10,
+    meta: i === 0 ? 1e308 : 100,
+    tipo: 'emergencia',
+    instituicao: i === 0 ? giantBidi : 'Banco',
+    pctCDI: i === 0 ? 1e308 : 100,
+  }));
+
+  const giantCartoes = Array.from({ length: MAX_COLLECTION_ITEMS + 50 }, (_, i) => ({
+    id: `c_${i}`,
+    nome: i === 0 ? giantBidi : `Card ${i}`,
+    diaCorte: 10,
+    diaVencimento: 17,
+    beneficio: 'Cashback',
+    limiteTotal: i === 0 ? 1e308 : 1000,
+    faturaAtual: i === 0 ? 1e308 : 0,
+  }));
+
+  const giantDividas = Array.from({ length: MAX_COLLECTION_ITEMS + 50 }, (_, i) => ({
+    id: `d_${i}`,
+    nome: i === 0 ? giantBidi : `Div ${i}`,
+    saldoDevedor: i === 0 ? 1e308 : 100,
+    taxaJurosMensal: i === 0 ? 1e308 : 2,
+    parcelaMinima: i === 0 ? 1e308 : 50,
+  }));
+
+  const giantMolde = Array.from({ length: MAX_COLLECTION_ITEMS + 50 }, (_, i) => ({
+    id: `m_${i}`,
+    descricao: i === 0 ? giantBidi : `Molde ${i}`,
+    valorPadrao: i === 0 ? 1e308 : 100,
+    diaVencimento: 10,
+    categoria: 'Moradia',
+    ativa: true,
+  }));
+
+  const giantHistorico = Array.from({ length: MAX_COLLECTION_ITEMS + 50 }, (_, i) => ({
+    id: `h_${i}`,
+    competencia: '2026-11',
+    mesLabel: i === 0 ? giantBidi : 'Nov/2026',
+    proventos: [{ id: 'p1', nome: 'Base', valor: i === 0 ? 1e308 : 1000 }],
+    descontos: [],
+    bruto: i === 0 ? 1e308 : 1000,
+    descontosTotal: 0,
+    liquido: i === 0 ? 1e308 : 1000,
+  }));
+
+  const norm = normalizeState({
+    bancos: giantBanks,
+    caixinhas: giantCaixinhas,
+    cartoes: giantCartoes,
+    dividas: giantDividas,
+    salario: {
+      proventos: Array.from({ length: MAX_COLLECTION_ITEMS + 50 }, (_, i) => ({
+        id: `p_${i}`,
+        nome: i === 0 ? giantBidi : `Prov ${i}`,
+        valor: i < 2 ? 1e308 : 10,
+      })),
+      descontos: [{ id: 'd1', nome: 'IR', valor: 1e308 }],
+    },
+    historicoContracheques: giantHistorico,
+    despesasFixasMolde: giantMolde,
+    despesasPorMes: manyMonths,
+    receitasPorMes: manyIncomeMonths,
+  });
+
+  // Magnitude travada em ±MAX_SAFE_MONEY
+  assert.equal(norm.bancos[0].saldo, MAX_SAFE_MONEY);
+  assert.equal(norm.bancos[1].saldo, -MAX_SAFE_MONEY);
+  assert.equal(norm.bancos[0].pctCDI, MAX_SAFE_MONEY);
+  assert.equal(norm.caixinhas[0].saldo, MAX_SAFE_MONEY);
+  assert.equal(norm.caixinhas[0].meta, MAX_SAFE_MONEY);
+  assert.equal(norm.caixinhas[0].aporteMensal, MAX_SAFE_MONEY);
+  assert.equal(norm.cartoes[0].limiteTotal, MAX_SAFE_MONEY);
+  assert.equal(norm.cartoes[0].faturaAtual, MAX_SAFE_MONEY);
+  assert.equal(norm.dividas[0].saldoDevedor, MAX_SAFE_MONEY);
+  assert.equal(norm.dividas[0].parcelaMinima, MAX_SAFE_MONEY);
+  assert.equal(norm.salario.bruto, MAX_SAFE_MONEY);
+  assert.equal(norm.historicoContracheques[0].bruto, MAX_SAFE_MONEY);
+  assert.equal(norm.despesasFixasMolde[0].valorPadrao, MAX_SAFE_MONEY);
+  assert.equal(norm.despesasPorMes['2000-01'][0].valor, MAX_SAFE_MONEY);
+  assert.equal(norm.receitasPorMes['2000-01'][0].valor, MAX_SAFE_MONEY);
+
+  // Strings truncadas em MAX_STRING_LEN (300) sem controles C0/C1 nem Bidi overrides
+  assert.equal(norm.bancos[0].nome.length, MAX_STRING_LEN);
+  assert.equal(norm.bancos[0].nome.includes('\u202E'), false);
+  assert.equal(norm.bancos[0].nome.includes('\u2066'), false);
+  assert.equal(norm.bancos[0].nome.includes('\x00'), false);
+  assert.equal(norm.caixinhas[0].instituicao.length, MAX_STRING_LEN);
+  assert.equal(norm.historicoContracheques[0].mesLabel.length, MAX_STRING_LEN);
+  assert.equal(norm.despesasPorMes['2000-01'][0].descricao.length, MAX_STRING_LEN);
+  assert.equal(norm.despesasPorMes['2000-01'][0].descricao.includes('\u202E'), false);
+
+  // Limites de coleções, competências e parcelas
+  assert.equal(norm.bancos.length, MAX_COLLECTION_ITEMS);
+  assert.equal(norm.caixinhas.length, MAX_COLLECTION_ITEMS);
+  assert.equal(norm.cartoes.length, MAX_COLLECTION_ITEMS);
+  assert.equal(norm.dividas.length, MAX_COLLECTION_ITEMS);
+  assert.equal(norm.salario.proventos.length, MAX_COLLECTION_ITEMS);
+  assert.equal(norm.historicoContracheques.length, MAX_COLLECTION_ITEMS);
+  assert.equal(norm.despesasFixasMolde.length, MAX_COLLECTION_ITEMS);
+  assert.equal(Object.keys(norm.despesasPorMes).length, 240);
+  assert.equal(norm.despesasPorMes['2000-01'].length, MAX_COLLECTION_ITEMS);
+  assert.equal(Object.keys(norm.receitasPorMes).length, 240);
+  assert.equal(norm.receitasPorMes['2000-01'].length, MAX_COLLECTION_ITEMS);
+  assert.equal(norm.despesasPorMes['2000-01'][0].parcelaAtual, MAX_INSTALLMENTS);
+  assert.equal(norm.despesasPorMes['2000-01'][0].totalParcelas, MAX_INSTALLMENTS);
+});
+
 
 
 

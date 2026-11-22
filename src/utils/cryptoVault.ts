@@ -6,12 +6,19 @@
  */
 
 export const VAULT_ITERATIONS = 600_000;
+export const MIN_KDF_ITERATIONS = 100_000;
+export const MAX_KDF_ITERATIONS = 2_000_000;
 export const MIN_VAULT_PASSWORD_LENGTH = 8;
 export const VAULT_SESSION_CONFIG_KEY = 'FINTRACK_VAULT_SESSION_CONFIG';
 
 // Alfabeto Base32 inequívoco (32 caracteres, sem 0, O, 1, I) -> 5 bits por caractere
 const RECOVERY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const RECOVERY_KEY_LENGTH = 24; // 24 * 5 = 120 bits de entropia
+
+// Framing de tamanho fixo para recoveryWrapped (bytes 0xFF, 0xFE nunca ocorrem em UTF-8 válido)
+const RECOVERY_PADDING_MAGIC = new Uint8Array([0xff, 0xfe, 0x01, 0x00]);
+const RECOVERY_PADDING_HEADER_LEN = 6; // 4 bytes magic + 2 bytes uint16 big-endian
+const RECOVERY_PADDING_BLOCK_SIZE = 256;
 
 export interface AutoLockOption {
   value: number;
@@ -50,6 +57,20 @@ export interface VaultEnvelope {
   iv: string;
   ciphertext: string;
   recoveryWrapped?: RecoveryWrappedPayload;
+}
+
+export interface VaultSession {
+  vaultKey: CryptoKey;
+  salt: string;
+  iterations: number;
+  recoveryWrapped?: RecoveryWrappedPayload;
+}
+
+export interface VaultUnlockResult<T = unknown> {
+  data: T;
+  session: VaultSession;
+  unlockedViaRecovery: boolean;
+  migratedFromLegacy: boolean;
 }
 
 export interface LegacyVaultSecurityV34 {
@@ -197,6 +218,76 @@ export function evaluatePasswordStrength(password: string): PasswordStrengthResu
   };
 }
 
+function validateKdfIterations(iterations: unknown, allowUndefinedFallback = false): number {
+  if (iterations === undefined && allowUndefinedFallback) {
+    return VAULT_ITERATIONS;
+  }
+  if (
+    typeof iterations !== 'number' ||
+    !Number.isInteger(iterations) ||
+    iterations < MIN_KDF_ITERATIONS ||
+    iterations > MAX_KDF_ITERATIONS
+  ) {
+    throw new Error(
+      `Contagem de iterações PBKDF2 inválida: deve ser um inteiro entre ${MIN_KDF_ITERATIONS} e ${MAX_KDF_ITERATIONS}.`
+    );
+  }
+  return iterations;
+}
+
+function padRecoveryPassword(password: string): Uint8Array<ArrayBuffer> {
+  const webCrypto = getWebCrypto();
+  const encoder = new TextEncoder();
+  const pwdBytes = encoder.encode(password);
+
+  try {
+    if (pwdBytes.byteLength === 0 || pwdBytes.byteLength > 0xffff) {
+      throw new Error('Comprimento de senha incompatível com o envelope de recuperação.');
+    }
+
+    const minSize = RECOVERY_PADDING_HEADER_LEN + pwdBytes.byteLength;
+    const totalSize =
+      Math.ceil(minSize / RECOVERY_PADDING_BLOCK_SIZE) * RECOVERY_PADDING_BLOCK_SIZE;
+    const padded = new Uint8Array(new ArrayBuffer(totalSize));
+
+    for (let offset = 0; offset < padded.byteLength; offset += 65536) {
+      webCrypto.getRandomValues(
+        padded.subarray(offset, Math.min(offset + 65536, padded.byteLength))
+      );
+    }
+
+    padded.set(RECOVERY_PADDING_MAGIC, 0);
+    padded[4] = (pwdBytes.byteLength >> 8) & 0xff;
+    padded[5] = pwdBytes.byteLength & 0xff;
+    padded.set(pwdBytes, RECOVERY_PADDING_HEADER_LEN);
+    return padded;
+  } finally {
+    wipeBytes(pwdBytes);
+  }
+}
+
+function unpackRecoveryPassword(decryptedBytes: Uint8Array): string {
+  const hasMagic =
+    decryptedBytes.byteLength >= RECOVERY_PADDING_HEADER_LEN &&
+    decryptedBytes[0] === RECOVERY_PADDING_MAGIC[0] &&
+    decryptedBytes[1] === RECOVERY_PADDING_MAGIC[1] &&
+    decryptedBytes[2] === RECOVERY_PADDING_MAGIC[2] &&
+    decryptedBytes[3] === RECOVERY_PADDING_MAGIC[3];
+
+  if (hasMagic) {
+    const len = (decryptedBytes[4] << 8) | decryptedBytes[5];
+    if (len <= 0 || RECOVERY_PADDING_HEADER_LEN + len > decryptedBytes.byteLength) {
+      throw new Error('Envelope de recuperação corrompido.');
+    }
+    return new TextDecoder().decode(
+      decryptedBytes.subarray(RECOVERY_PADDING_HEADER_LEN, RECOVERY_PADDING_HEADER_LEN + len)
+    );
+  }
+
+  // Retrocompatibilidade com envelopes antigos (sem padding)
+  return new TextDecoder().decode(decryptedBytes);
+}
+
 /**
  * Deriva uma CryptoKey AES-256-GCM não-extraível via PBKDF2-HMAC-SHA256.
  */
@@ -211,9 +302,7 @@ export async function deriveVaultKey(
   if (!(saltBytes instanceof Uint8Array) || saltBytes.byteLength < 8) {
     throw new Error('Salt criptográfico inválido.');
   }
-  if (!Number.isInteger(iterations) || iterations <= 0) {
-    throw new Error('Contagem de iterações PBKDF2 inválida.');
-  }
+  const safeIterations = validateKdfIterations(iterations, false);
 
   const webCrypto = getWebCrypto();
   const encoder = new TextEncoder();
@@ -234,7 +323,7 @@ export async function deriveVaultKey(
       {
         name: 'PBKDF2',
         salt: safeSalt,
-        iterations,
+        iterations: safeIterations,
         hash: 'SHA-256',
       },
       keyMaterial,
@@ -294,6 +383,42 @@ async function aesGcmDecrypt(
   }
 }
 
+async function wrapMasterPasswordWithRecoveryKey(
+  masterPassword: string,
+  recoveryKey: string,
+  iterations = VAULT_ITERATIONS
+): Promise<RecoveryWrappedPayload> {
+  const normalizedRecovery = normalizeRecoveryKey(recoveryKey);
+  if (normalizedRecovery.length !== RECOVERY_KEY_LENGTH) {
+    throw new Error('Recovery Key inválida: deve conter exatamente 24 caracteres alfanuméricos.');
+  }
+
+  const safeIterations = validateKdfIterations(iterations, false);
+  const webCrypto = getWebCrypto();
+  const recoverySalt = webCrypto.getRandomValues(new Uint8Array(new ArrayBuffer(16)));
+  let paddedPasswordBytes: Uint8Array<ArrayBuffer> | null = null;
+  let recIv: Uint8Array<ArrayBuffer> | null = null;
+  let recCiphertext: Uint8Array<ArrayBuffer> | null = null;
+
+  try {
+    const recKey = await deriveVaultKey(normalizedRecovery, recoverySalt, safeIterations);
+    paddedPasswordBytes = padRecoveryPassword(masterPassword);
+    const recEncrypted = await aesGcmEncrypt(recKey, paddedPasswordBytes);
+    recIv = recEncrypted.iv;
+    recCiphertext = recEncrypted.ciphertext;
+
+    return {
+      kdf: 'PBKDF2-SHA256',
+      iterations: safeIterations,
+      salt: bytesToBase64(recoverySalt),
+      iv: bytesToBase64(recIv),
+      ciphertext: bytesToBase64(recCiphertext),
+    };
+  } finally {
+    wipeBytes(recoverySalt, paddedPasswordBytes, recIv, recCiphertext);
+  }
+}
+
 /**
  * Type guard para envelopes criptográficos `.vault` (v4.0 e legado v3.4).
  */
@@ -321,75 +446,116 @@ export function isEncryptedVaultEnvelope(
 }
 
 /**
- * Cifra qualquer payload JSON serializável em um envelope `.vault` v4.0 (AES-256-GCM + PBKDF2-600k).
- * Se `recoveryKey` for informada, embrulha a senha mestra em `recoveryWrapped` para recuperação zero-knowledge.
+ * Cifra dados diretamente com a CryptoKey não-extraível da sessão ativa (`AES-256-GCM`),
+ * gerando um novo IV CSPRNG de 96 bits a cada gravação sem re-executar PBKDF2.
  */
-export async function encryptVaultPayload(
+export async function encryptWithVaultSession(
+  data: unknown,
+  session: VaultSession
+): Promise<VaultEnvelope> {
+  if (
+    !session ||
+    !session.vaultKey ||
+    typeof session.salt !== 'string' ||
+    session.salt.length === 0
+  ) {
+    throw new Error('Sessão do cofre inválida ou expirada.');
+  }
+  const safeIterations = validateKdfIterations(session.iterations, false);
+  if (session.recoveryWrapped) {
+    validateKdfIterations(session.recoveryWrapped.iterations, false);
+  }
+
+  const encoder = new TextEncoder();
+  const plaintextBytes = encoder.encode(JSON.stringify(data));
+  let iv: Uint8Array<ArrayBuffer> | null = null;
+  let ciphertext: Uint8Array<ArrayBuffer> | null = null;
+
+  try {
+    const encrypted = await aesGcmEncrypt(session.vaultKey, plaintextBytes);
+    iv = encrypted.iv;
+    ciphertext = encrypted.ciphertext;
+
+    const envelope: VaultEnvelope = {
+      __vault: true,
+      version: '4.0',
+      kdf: 'PBKDF2-SHA256',
+      iterations: safeIterations,
+      salt: session.salt,
+      iv: bytesToBase64(iv),
+      ciphertext: bytesToBase64(ciphertext),
+    };
+
+    if (session.recoveryWrapped) {
+      envelope.recoveryWrapped = { ...session.recoveryWrapped };
+    }
+
+    return envelope;
+  } finally {
+    wipeBytes(plaintextBytes, iv, ciphertext);
+  }
+}
+
+/**
+ * Deriva a CryptoKey não-extraível uma única vez, cria o envelope `.vault` v4.0
+ * (com `recoveryWrapped` opcional em padding de tamanho fixo) e retorna a sessão ativa sem senha em texto claro.
+ */
+export async function createVaultSession(
   data: unknown,
   password: string,
   recoveryKey?: string
-): Promise<VaultEnvelope> {
+): Promise<{ envelope: VaultEnvelope; session: VaultSession }> {
   const pwdCheck = validateVaultPassword(password);
   if (!pwdCheck.valid) {
     throw new Error(pwdCheck.reason);
   }
 
   const webCrypto = getWebCrypto();
-  const encoder = new TextEncoder();
   const salt = webCrypto.getRandomValues(new Uint8Array(new ArrayBuffer(16)));
-  const plaintextBytes = encoder.encode(JSON.stringify(data));
-
-  let recoverySalt: Uint8Array<ArrayBuffer> | null = null;
-  let recoveryPasswordBytes: Uint8Array | null = null;
 
   try {
     const vaultKey = await deriveVaultKey(password, salt, VAULT_ITERATIONS);
-    const { iv, ciphertext } = await aesGcmEncrypt(vaultKey, plaintextBytes);
+    const recoveryWrapped =
+      recoveryKey && recoveryKey.trim().length > 0
+        ? await wrapMasterPasswordWithRecoveryKey(password, recoveryKey, VAULT_ITERATIONS)
+        : undefined;
 
-    const envelope: VaultEnvelope = {
-      __vault: true,
-      version: '4.0',
-      kdf: 'PBKDF2-SHA256',
-      iterations: VAULT_ITERATIONS,
+    const session: VaultSession = {
+      vaultKey,
       salt: bytesToBase64(salt),
-      iv: bytesToBase64(iv),
-      ciphertext: bytesToBase64(ciphertext),
+      iterations: VAULT_ITERATIONS,
+      ...(recoveryWrapped ? { recoveryWrapped } : {}),
     };
 
-    wipeBytes(iv, ciphertext);
-
-    if (recoveryKey && recoveryKey.trim().length > 0) {
-      const normalizedRecovery = normalizeRecoveryKey(recoveryKey);
-      if (normalizedRecovery.length !== RECOVERY_KEY_LENGTH) {
-        throw new Error('Recovery Key inválida: deve conter exatamente 24 caracteres alfanuméricos.');
-      }
-      recoverySalt = webCrypto.getRandomValues(new Uint8Array(new ArrayBuffer(16)));
-      const recKey = await deriveVaultKey(normalizedRecovery, recoverySalt, VAULT_ITERATIONS);
-      recoveryPasswordBytes = encoder.encode(password);
-      const recEncrypted = await aesGcmEncrypt(recKey, recoveryPasswordBytes);
-
-      envelope.recoveryWrapped = {
-        kdf: 'PBKDF2-SHA256',
-        iterations: VAULT_ITERATIONS,
-        salt: bytesToBase64(recoverySalt),
-        iv: bytesToBase64(recEncrypted.iv),
-        ciphertext: bytesToBase64(recEncrypted.ciphertext),
-      };
-
-      wipeBytes(recEncrypted.iv, recEncrypted.ciphertext);
-    }
-
-    return envelope;
+    const envelope = await encryptWithVaultSession(data, session);
+    return { envelope, session };
   } finally {
-    wipeBytes(salt, plaintextBytes, recoverySalt, recoveryPasswordBytes);
+    wipeBytes(salt);
   }
 }
 
-async function decryptV4Envelope<T>(envelope: VaultEnvelope, secret: string): Promise<T> {
-  const iterations =
-    typeof envelope.iterations === 'number' && envelope.iterations > 0
-      ? envelope.iterations
-      : VAULT_ITERATIONS;
+/**
+ * Cifra qualquer payload JSON serializável em um envelope `.vault` v4.0 (AES-256-GCM + PBKDF2-600k).
+ * Se `recoveryKey` for informada, embrulha a senha mestra em `recoveryWrapped` com padding de tamanho fixo.
+ */
+export async function encryptVaultPayload(
+  data: unknown,
+  password: string,
+  recoveryKey?: string
+): Promise<VaultEnvelope> {
+  const { envelope } = await createVaultSession(data, password, recoveryKey);
+  return envelope;
+}
+
+async function decryptV4Envelope<T>(
+  envelope: VaultEnvelope,
+  secret: string
+): Promise<VaultUnlockResult<T>> {
+  const iterations = validateKdfIterations(envelope.iterations, false);
+  const recIters = envelope.recoveryWrapped
+    ? validateKdfIterations(envelope.recoveryWrapped.iterations, false)
+    : null;
+
   const saltBytes = base64ToBytes(envelope.salt);
   const ivBytes = base64ToBytes(envelope.iv);
   const ciphertextBytes = base64ToBytes(envelope.ciphertext);
@@ -397,11 +563,25 @@ async function decryptV4Envelope<T>(envelope: VaultEnvelope, secret: string): Pr
   try {
     // 1. Tentativa direta com a senha mestra
     try {
-      const key = await deriveVaultKey(secret, saltBytes, iterations);
-      const pt = await aesGcmDecrypt(key, ciphertextBytes, ivBytes);
+      const vaultKey = await deriveVaultKey(secret, saltBytes, iterations);
+      const pt = await aesGcmDecrypt(vaultKey, ciphertextBytes, ivBytes);
       try {
         const jsonStr = new TextDecoder().decode(pt);
-        return safeJsonParseNoProto<T>(jsonStr);
+        const data = safeJsonParseNoProto<T>(jsonStr);
+        const session: VaultSession = {
+          vaultKey,
+          salt: envelope.salt,
+          iterations,
+          ...(envelope.recoveryWrapped
+            ? { recoveryWrapped: { ...envelope.recoveryWrapped } }
+            : {}),
+        };
+        return {
+          data,
+          session,
+          unlockedViaRecovery: false,
+          migratedFromLegacy: false,
+        };
       } finally {
         wipeBytes(pt);
       }
@@ -409,15 +589,10 @@ async function decryptV4Envelope<T>(envelope: VaultEnvelope, secret: string): Pr
       // Continua para tentativa via Recovery Key se disponível
     }
 
-    // 2. Tentativa via Recovery Key embrulhada
-    if (envelope.recoveryWrapped) {
+    // 2. Tentativa via Recovery Key embrulhada (deriva vaultKey da masterPassword real)
+    if (envelope.recoveryWrapped && recIters !== null) {
       const normRecovery = normalizeRecoveryKey(secret);
       if (normRecovery.length === RECOVERY_KEY_LENGTH) {
-        const recIters =
-          typeof envelope.recoveryWrapped.iterations === 'number' &&
-          envelope.recoveryWrapped.iterations > 0
-            ? envelope.recoveryWrapped.iterations
-            : iterations;
         const recSalt = base64ToBytes(envelope.recoveryWrapped.salt);
         const recIv = base64ToBytes(envelope.recoveryWrapped.iv);
         const recCt = base64ToBytes(envelope.recoveryWrapped.ciphertext);
@@ -425,18 +600,38 @@ async function decryptV4Envelope<T>(envelope: VaultEnvelope, secret: string): Pr
         try {
           const recKey = await deriveVaultKey(normRecovery, recSalt, recIters);
           const recoveredPwdBytes = await aesGcmDecrypt(recKey, recCt, recIv);
+          let masterPassword: string | null = null;
           try {
-            const masterPassword = new TextDecoder().decode(recoveredPwdBytes);
-            const vaultKey = await deriveVaultKey(masterPassword, saltBytes, iterations);
-            const pt = await aesGcmDecrypt(vaultKey, ciphertextBytes, ivBytes);
-            try {
-              const jsonStr = new TextDecoder().decode(pt);
-              return safeJsonParseNoProto<T>(jsonStr);
-            } finally {
-              wipeBytes(pt);
-            }
+            masterPassword = unpackRecoveryPassword(recoveredPwdBytes);
           } finally {
             wipeBytes(recoveredPwdBytes);
+          }
+
+          let vaultKey: CryptoKey;
+          try {
+            vaultKey = await deriveVaultKey(masterPassword, saltBytes, iterations);
+          } finally {
+            masterPassword = null;
+          }
+
+          const pt = await aesGcmDecrypt(vaultKey, ciphertextBytes, ivBytes);
+          try {
+            const jsonStr = new TextDecoder().decode(pt);
+            const data = safeJsonParseNoProto<T>(jsonStr);
+            const session: VaultSession = {
+              vaultKey,
+              salt: envelope.salt,
+              iterations,
+              recoveryWrapped: { ...envelope.recoveryWrapped },
+            };
+            return {
+              data,
+              session,
+              unlockedViaRecovery: true,
+              migratedFromLegacy: false,
+            };
+          } finally {
+            wipeBytes(pt);
           }
         } catch {
           // Falha silenciosa para lançar erro genérico unificado abaixo
@@ -454,18 +649,29 @@ async function decryptV4Envelope<T>(envelope: VaultEnvelope, secret: string): Pr
 
 async function decryptLegacyV34Envelope<T>(
   envelope: LegacyVaultEnvelopeV34,
-  secret: string
-): Promise<T> {
+  secret: string,
+  buildMigrationSession: boolean
+): Promise<VaultUnlockResult<T>> {
   const sec = envelope.seguranca;
   if (!sec || !sec.cifraSalt) {
     throw new Error('Envelope v3.4 inválido: metadados de cifragem ausentes.');
   }
 
-  const iterations =
-    typeof sec.kdfIters === 'number' && sec.kdfIters > 0 ? sec.kdfIters : VAULT_ITERATIONS;
+  const iterations = validateKdfIterations(sec.kdfIters, true);
   const cifraSaltBytes = base64ToBytes(sec.cifraSalt);
   const ivBytes = base64ToBytes(envelope.iv);
   const ciphertextBytes = base64ToBytes(envelope.ciphertext);
+  const recSaltB64 = sec.recoveryKeySalt || sec.recoverySalt;
+  const legacyRecoveryWrapped: RecoveryWrappedPayload | undefined =
+    sec.recoveryEnvelope && sec.recoveryEnvelopeIv && recSaltB64
+      ? {
+          kdf: 'PBKDF2-SHA256',
+          iterations,
+          salt: recSaltB64,
+          iv: sec.recoveryEnvelopeIv,
+          ciphertext: sec.recoveryEnvelope,
+        }
+      : undefined;
 
   try {
     // 1. Tentativa direta com senha mestra v3.4
@@ -474,7 +680,19 @@ async function decryptLegacyV34Envelope<T>(
       const pt = await aesGcmDecrypt(vaultKey, ciphertextBytes, ivBytes);
       try {
         const jsonStr = new TextDecoder().decode(pt);
-        return safeJsonParseNoProto<T>(jsonStr);
+        const data = safeJsonParseNoProto<T>(jsonStr);
+        const session: VaultSession = {
+          vaultKey,
+          salt: sec.cifraSalt,
+          iterations,
+          ...(legacyRecoveryWrapped ? { recoveryWrapped: { ...legacyRecoveryWrapped } } : {}),
+        };
+        return {
+          data,
+          session,
+          unlockedViaRecovery: false,
+          migratedFromLegacy: true,
+        };
       } finally {
         wipeBytes(pt);
       }
@@ -483,7 +701,6 @@ async function decryptLegacyV34Envelope<T>(
     }
 
     // 2. Tentativa via Recovery Key v3.4
-    const recSaltB64 = sec.recoveryKeySalt || sec.recoverySalt;
     if (sec.recoveryEnvelope && sec.recoveryEnvelopeIv && recSaltB64) {
       const normRecovery = normalizeRecoveryKey(secret);
       if (normRecovery.length === RECOVERY_KEY_LENGTH) {
@@ -494,18 +711,69 @@ async function decryptLegacyV34Envelope<T>(
         try {
           const recKey = await deriveVaultKey(normRecovery, recSalt, iterations);
           const pwdBytes = await aesGcmDecrypt(recKey, recCt, recIv);
+          let masterPassword: string | null = null;
           try {
-            const masterPassword = new TextDecoder().decode(pwdBytes);
-            const vaultKey = await deriveVaultKey(masterPassword, cifraSaltBytes, iterations);
-            const pt = await aesGcmDecrypt(vaultKey, ciphertextBytes, ivBytes);
+            masterPassword = unpackRecoveryPassword(pwdBytes);
+          } finally {
+            wipeBytes(pwdBytes);
+          }
+
+          try {
+            const legacyVaultKey = await deriveVaultKey(masterPassword, cifraSaltBytes, iterations);
+            const pt = await aesGcmDecrypt(legacyVaultKey, ciphertextBytes, ivBytes);
+            let data: T;
             try {
               const jsonStr = new TextDecoder().decode(pt);
-              return safeJsonParseNoProto<T>(jsonStr);
+              data = safeJsonParseNoProto<T>(jsonStr);
             } finally {
               wipeBytes(pt);
             }
+
+            if (buildMigrationSession) {
+              const webCrypto = getWebCrypto();
+              const newSalt = webCrypto.getRandomValues(new Uint8Array(new ArrayBuffer(16)));
+              try {
+                const migratedVaultKey = await deriveVaultKey(
+                  masterPassword,
+                  newSalt,
+                  VAULT_ITERATIONS
+                );
+                const rewrappedRecovery = await wrapMasterPasswordWithRecoveryKey(
+                  masterPassword,
+                  normRecovery,
+                  VAULT_ITERATIONS
+                );
+                return {
+                  data,
+                  session: {
+                    vaultKey: migratedVaultKey,
+                    salt: bytesToBase64(newSalt),
+                    iterations: VAULT_ITERATIONS,
+                    recoveryWrapped: rewrappedRecovery,
+                  },
+                  unlockedViaRecovery: true,
+                  migratedFromLegacy: true,
+                };
+              } finally {
+                wipeBytes(newSalt);
+              }
+            }
+
+            return {
+              data,
+              session: {
+                vaultKey: legacyVaultKey,
+                salt: sec.cifraSalt,
+                iterations,
+                ...(legacyRecoveryWrapped
+                  ? { recoveryWrapped: { ...legacyRecoveryWrapped } }
+                  : {}),
+              },
+              unlockedViaRecovery: true,
+              migratedFromLegacy: true,
+            };
           } finally {
-            wipeBytes(pwdBytes);
+            masterPassword = null;
           }
         } catch {
           // Falha silenciosa para lançar erro genérico unificado abaixo
@@ -519,6 +787,29 @@ async function decryptLegacyV34Envelope<T>(
   } finally {
     wipeBytes(cifraSaltBytes, ivBytes, ciphertextBytes);
   }
+}
+
+/**
+ * Desbloqueia um envelope `.vault` (v4.0 ou legado v3.4) e retorna os dados junto a uma `VaultSession`
+ * baseada em `CryptoKey` não-extraível (zero senha mestra retida em memória).
+ */
+export async function unlockVaultWithSession<T = unknown>(
+  envelope: unknown,
+  secret: string
+): Promise<VaultUnlockResult<T>> {
+  if (!isEncryptedVaultEnvelope(envelope)) {
+    throw new Error('Formato de envelope .vault inválido ou corrompido.');
+  }
+  if (!secret || typeof secret !== 'string') {
+    throw new Error('Credencial inválida para desbloqueio do cofre.');
+  }
+
+  const rec = envelope as unknown as Record<string, unknown>;
+  if (typeof rec.salt === 'string' && rec.salt.length > 0) {
+    return decryptV4Envelope<T>(envelope as VaultEnvelope, secret);
+  }
+
+  return decryptLegacyV34Envelope<T>(envelope as LegacyVaultEnvelopeV34, secret, true);
 }
 
 /**
@@ -538,10 +829,12 @@ export async function decryptVaultPayload<T = unknown>(
 
   const rec = envelope as unknown as Record<string, unknown>;
   if (typeof rec.salt === 'string' && rec.salt.length > 0) {
-    return decryptV4Envelope<T>(envelope as VaultEnvelope, secret);
+    const res = await decryptV4Envelope<T>(envelope as VaultEnvelope, secret);
+    return res.data;
   }
 
-  return decryptLegacyV34Envelope<T>(envelope as LegacyVaultEnvelopeV34, secret);
+  const res = await decryptLegacyV34Envelope<T>(envelope as LegacyVaultEnvelopeV34, secret, false);
+  return res.data;
 }
 
 /**

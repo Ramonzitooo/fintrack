@@ -780,7 +780,7 @@ export const ExpensesTab: React.FC<ExpensesTabProps> = ({
                   if (extraFormError) setExtraFormError(null);
                 }}
                 placeholder="450.00"
-                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
               />
             </div>
 
@@ -996,7 +996,7 @@ export const ExpensesTab: React.FC<ExpensesTabProps> = ({
                   if (debtFormError) setDebtFormError(null);
                 }}
                 placeholder="2500.00"
-                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
               />
             </div>
             <div>
@@ -1030,7 +1030,7 @@ export const ExpensesTab: React.FC<ExpensesTabProps> = ({
                   if (debtFormError) setDebtFormError(null);
                 }}
                 placeholder="150.00"
-                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
               />
             </div>
             <div>
@@ -1075,7 +1075,7 @@ export const ExpensesTab: React.FC<ExpensesTabProps> = ({
                     step="50"
                     value={extraDebtBudget}
                     onChange={(e) => setExtraDebtBudget(Math.max(0, parseFloat(e.target.value) || 0))}
-                    className="w-28 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono tabular-nums text-right text-slate-900 dark:text-white"
+                    className="w-28 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono tabular-nums text-right text-slate-900 dark:text-white privacy-val"
                   />
                 </label>
               </div>

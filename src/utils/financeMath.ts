@@ -92,19 +92,30 @@ export interface DebtItem {
 }
 
 /**
+ * Limites defensivos do motor financeiro:
+ * - MAX_SAFE_MONEY = 9e12 garante |cents| <= 9e14 < Number.MAX_SAFE_INTEGER (~9.007e15),
+ *   evitando overflow para Infinity (ex.: 1e308 * 100) e perda de precisão inteira.
+ * - MAX_INSTALLMENTS = 600 (50 anos mensais) previne CPU/memória DoS em loops de parcelamento.
+ */
+export const MAX_SAFE_MONEY = 9_000_000_000_000;
+export const MAX_INSTALLMENTS = 600;
+
+/**
  * Motor de Aritmética Inteira em Centavos (Cents Engine):
  * Elimina desvios de ponto flutuante binário IEEE 754 (ex: 0.1 + 0.2 = 0.30000000000000004)
  * convertendo valores monetários para inteiros de centavos antes de somar ou subtrair.
  */
 export function toCents(value: number): number {
   const num = Number(value);
-  if (!Number.isFinite(num)) return 0;
+  if (!Number.isFinite(num) || Math.abs(num) > MAX_SAFE_MONEY) return 0;
   const cents = Math.round(num * 100);
   return cents === 0 ? 0 : cents;
 }
 
 export function fromCents(cents: number): number {
-  const intCents = Math.round(Number(cents) || 0);
+  const numCents = Number(cents);
+  if (!Number.isFinite(numCents) || Math.abs(numCents) > MAX_SAFE_MONEY * 100) return 0;
+  const intCents = Math.round(numCents);
   const val = intCents / 100;
   return val === 0 ? 0 : val;
 }
@@ -528,10 +539,23 @@ export function simulateCashVsInstallments(
   verdict: 'PARCELAR' | 'A_VISTA' | 'EMPATE';
   breakEvenDiscountPct: number;
 } {
-  const price = Math.max(0, Number(nominalPrice) || 0);
-  const discPct = Math.max(0, Math.min(99, Number(cashDiscountPct) || 0));
-  const n = Math.max(1, Math.round(Number(installments) || 1));
-  const r = Math.max(0, Number(monthlyNetYieldPct) || 0) / 100;
+  const rawPrice = Number(nominalPrice);
+  const price =
+    Number.isFinite(rawPrice) && rawPrice > 0 && rawPrice <= MAX_SAFE_MONEY ? rawPrice : 0;
+  const rawDisc = Number(cashDiscountPct);
+  const discPct =
+    Number.isFinite(rawDisc) && rawDisc > 0 && rawDisc <= MAX_SAFE_MONEY
+      ? Math.min(99, rawDisc)
+      : 0;
+  const rawInstallments = Number(installments);
+  const n = Number.isFinite(rawInstallments)
+    ? Math.min(MAX_INSTALLMENTS, Math.max(1, Math.round(rawInstallments)))
+    : 1;
+  const rawYield = Number(monthlyNetYieldPct);
+  const r =
+    Number.isFinite(rawYield) && rawYield > 0 && rawYield <= MAX_SAFE_MONEY
+      ? Math.min(100, rawYield) / 100
+      : 0;
 
   const cashPrice = Math.round(price * (1 - discPct / 100) * 100) / 100;
   const immediateDiscountValue = Math.round((price - cashPrice) * 100) / 100;
@@ -698,7 +722,7 @@ export function parseQuickExpenseCommand(text: string): {
   categoria: ExpenseItem['categoria'];
   formaPagamento: string;
 } | null {
-  if (!text || typeof text !== 'string') return null;
+  if (!text || typeof text !== 'string' || text.length > 500) return null;
   const trimmed = text.trim();
   const monetaryRegex = /(?:r\$\s*)?(\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?)/gi;
 
@@ -712,7 +736,7 @@ export function parseQuickExpenseCommand(text: string): {
   for (const match of trimmed.matchAll(monetaryRegex)) {
     const rawNum = match[1];
     const valor = parseMonetaryToken(rawNum);
-    if (Number.isFinite(valor) && valor > 0 && match.index !== undefined) {
+    if (Number.isFinite(valor) && valor > 0 && valor <= MAX_SAFE_MONEY && match.index !== undefined) {
       candidates.push({
         fullMatch: match[0],
         index: match.index,
@@ -745,7 +769,7 @@ export function parseQuickExpenseCommand(text: string): {
 
   return {
     descricao: descClean.charAt(0).toUpperCase() + descClean.slice(1),
-    valor: Math.round(chosen.valor * 100) / 100,
+    valor: fromCents(toCents(chosen.valor)),
     categoria: classifyQuickExpenseCategory(descClean),
     formaPagamento: classifyQuickPaymentMethod(withoutVal),
   };
@@ -1149,11 +1173,16 @@ export function generateInstallmentExpenses(params: {
   contaOrigemId?: string | null;
   contaOrigem?: string;
 }): Record<string, ExpenseItem[]> {
-  const totalCents = toCents(params.valorTotal);
-  const n = Math.trunc(Number(params.totalParcelas));
-  if (totalCents <= 0 || !Number.isFinite(n) || n < 1) {
+  const valorTotal = Number(params.valorTotal);
+  if (!Number.isFinite(valorTotal) || valorTotal <= 0 || valorTotal > MAX_SAFE_MONEY) {
     return {};
   }
+  const totalCents = toCents(valorTotal);
+  const rawN = Math.trunc(Number(params.totalParcelas));
+  if (totalCents <= 0 || !Number.isFinite(rawN) || rawN < 1) {
+    return {};
+  }
+  const n = Math.min(MAX_INSTALLMENTS, rawN);
 
   const compMatch = /^(\d{4})-(\d{2})$/.exec(params.competenciaInicial);
   if (!compMatch) return {};

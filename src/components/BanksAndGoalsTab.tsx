@@ -762,7 +762,7 @@ export const GoalsTab: React.FC<GoalsViewProps> = ({
                             setEditGoalMeta(e.target.value);
                             if (editGoalError) setEditGoalError(null);
                           }}
-                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
                         />
                       </div>
 
@@ -783,7 +783,7 @@ export const GoalsTab: React.FC<GoalsViewProps> = ({
                             setEditGoalAporte(e.target.value);
                             if (editGoalError) setEditGoalError(null);
                           }}
-                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white"
+                          className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono tabular-nums text-slate-900 dark:text-white privacy-val"
                         />
                       </div>
 

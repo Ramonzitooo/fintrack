@@ -5,11 +5,17 @@ import {
   DebtItem,
   ExpenseItem,
   ExtraIncomeItem,
+  MAX_INSTALLMENTS,
+  MAX_SAFE_MONEY,
   PayrollItem,
   RecurringExpenseTemplate,
 } from './financeMath';
 
 export const STORAGE_KEY = 'APP_FINANCEIRO_V2_DATA';
+export const MAX_BACKUP_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_COLLECTION_ITEMS = 2000;
+export const MAX_STRING_LEN = 300;
+const MAX_MONTH_BUCKETS = 240;
 
 export interface HistoricalPayroll {
   id: string;
@@ -118,11 +124,17 @@ export function safeJsonParse(jsonString: string): any {
 }
 
 /**
- * Sanitiza célula individual de CSV contra Injeção de Fórmulas (CWE-1236)
- * e escapa aspas duplas internas conforme RFC 4180.
+ * Sanitiza célula individual de CSV contra Injeção de Fórmulas (CWE-1236),
+ * removendo caracteres de controle C0/C1 e Bidi overrides (bloqueando bypass
+ * como "\x01=CMD|' /C calc'!A0") e quebras de linha antes de testar prefixos,
+ * além de escapar aspas duplas internas conforme RFC 4180.
  */
 export function sanitizeCsvCell(val: unknown): string {
-  let str = String(val ?? '').replace(/\r?\n|\r/g, ' ').trim();
+  let str = String(val ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069\u061C]+/g, '')
+    .replace(/\r?\n|\r/g, ' ')
+    .trim();
   if (/^[=+\-@\t\r|]/.test(str)) {
     str = `'${str}`;
   }
@@ -231,8 +243,36 @@ export function saveAppState(state: AppState): { ok: boolean; error?: string } {
   }
 }
 
-function finiteNum(val: unknown, fallback: number, min = -Infinity, max = Infinity): number {
-  if (typeof val === 'boolean' || val === null || val === undefined || val === '') {
+// eslint-disable-next-line no-control-regex
+const UNSAFE_TEXT_CHARS_RE = /[\x00-\x1F\x7F-\x9F\u202A-\u202E\u2066-\u2069\u061C]+/g;
+
+export function safeStr(val: unknown, fallback = '', maxLen = MAX_STRING_LEN): string {
+  if (val === null || val === undefined || typeof val === 'object' || typeof val === 'symbol') {
+    return fallback;
+  }
+  const limit = Math.max(0, Math.trunc(maxLen));
+  const cleaned = String(val)
+    .replace(UNSAFE_TEXT_CHARS_RE, '')
+    .trim()
+    .slice(0, limit)
+    .trim();
+  return cleaned.length > 0 ? cleaned : fallback;
+}
+
+function finiteNum(
+  val: unknown,
+  fallback: number,
+  min = -MAX_SAFE_MONEY,
+  max = MAX_SAFE_MONEY
+): number {
+  if (
+    typeof val === 'boolean' ||
+    typeof val === 'object' ||
+    typeof val === 'symbol' ||
+    val === null ||
+    val === undefined ||
+    val === ''
+  ) {
     return Math.min(max, Math.max(min, fallback));
   }
   const n = Number(val);
@@ -304,15 +344,16 @@ function extractSourcePayload(raw: any): any {
 
 function parseBanks(rawBancos: unknown, fallback: BankAccount[]): BankAccount[] {
   if (!Array.isArray(rawBancos)) return fallback;
+  const limited = rawBancos.slice(0, MAX_COLLECTION_ITEMS);
   const result: BankAccount[] = [];
-  for (let i = 0; i < rawBancos.length; i++) {
-    const b = rawBancos[i];
+  for (let i = 0; i < limited.length; i++) {
+    const b = limited[i];
     if (!b || typeof b !== 'object') continue;
     const rendeJuros = Boolean(b.rendeJuros);
     const tipo = VALID_BANK_TYPES.has(b.tipo) ? b.tipo : 'Conta Digital';
     result.push({
-      id: String(b.id || `b_${i + 1}`),
-      nome: String(b.nome || 'Conta'),
+      id: safeStr(b.id, `b_${i + 1}`),
+      nome: safeStr(b.nome, 'Conta'),
       tipo,
       saldo: finiteNum(b.saldo, 0),
       rendeJuros,
@@ -324,19 +365,20 @@ function parseBanks(rawBancos: unknown, fallback: BankAccount[]): BankAccount[] 
 
 function parseCaixinhas(rawCaixinhas: unknown, fallback: Caixinha[]): Caixinha[] {
   if (!Array.isArray(rawCaixinhas)) return fallback;
+  const limited = rawCaixinhas.slice(0, MAX_COLLECTION_ITEMS);
   const result: Caixinha[] = [];
-  for (let i = 0; i < rawCaixinhas.length; i++) {
-    const c = rawCaixinhas[i];
+  for (let i = 0; i < limited.length; i++) {
+    const c = limited[i];
     if (!c || typeof c !== 'object') continue;
     const tipo = VALID_CAIXINHA_TYPES.has(c.tipo) ? c.tipo : 'outros';
     result.push({
-      id: String(c.id || `cx_${i + 1}`),
-      nome: String(c.nome || 'Caixinha'),
+      id: safeStr(c.id, `cx_${i + 1}`),
+      nome: safeStr(c.nome, 'Caixinha'),
       saldo: finiteNum(c.saldo, 0, 0),
       aporteMensal: finiteNum(c.aporteMensal, 0, 0),
       meta: finiteNum(c.meta, 0, 0),
       tipo,
-      instituicao: String(c.instituicao || 'Banco'),
+      instituicao: safeStr(c.instituicao, 'Banco'),
       pctCDI: finiteNum(c.pctCDI, 100, 0),
     });
   }
@@ -345,14 +387,15 @@ function parseCaixinhas(rawCaixinhas: unknown, fallback: Caixinha[]): Caixinha[]
 
 function parseCartoes(rawCartoes: unknown, fallback: CreditCard[]): CreditCard[] {
   if (!Array.isArray(rawCartoes)) return fallback;
+  const limited = rawCartoes.slice(0, MAX_COLLECTION_ITEMS);
   const result: CreditCard[] = [];
-  for (let i = 0; i < rawCartoes.length; i++) {
-    const c = rawCartoes[i];
+  for (let i = 0; i < limited.length; i++) {
+    const c = limited[i];
     if (!c || typeof c !== 'object') continue;
     const beneficio = VALID_CARD_BENEFITS.has(c.beneficio) ? c.beneficio : 'SemAnuidade';
     result.push({
-      id: String(c.id || `c_${i + 1}`),
-      nome: String(c.nome || 'Cartão'),
+      id: safeStr(c.id, `c_${i + 1}`),
+      nome: safeStr(c.nome, 'Cartão'),
       diaCorte: Math.trunc(finiteNum(c.diaCorte, 10, 1, 31)),
       diaVencimento: Math.trunc(finiteNum(c.diaVencimento, 17, 1, 31)),
       beneficio,
@@ -365,13 +408,14 @@ function parseCartoes(rawCartoes: unknown, fallback: CreditCard[]): CreditCard[]
 
 function parseDividas(rawDividas: unknown, fallback: DebtItem[]): DebtItem[] {
   if (!Array.isArray(rawDividas)) return fallback;
+  const limited = rawDividas.slice(0, MAX_COLLECTION_ITEMS);
   const result: DebtItem[] = [];
-  for (let i = 0; i < rawDividas.length; i++) {
-    const d = rawDividas[i];
+  for (let i = 0; i < limited.length; i++) {
+    const d = limited[i];
     if (!d || typeof d !== 'object') continue;
     result.push({
-      id: String(d.id || `div_${i + 1}`),
-      nome: String(d.nome || 'Dívida'),
+      id: safeStr(d.id, `div_${i + 1}`),
+      nome: safeStr(d.nome, 'Dívida'),
       saldoDevedor: finiteNum(d.saldoDevedor, 0, 0),
       taxaJurosMensal: finiteNum(d.taxaJurosMensal, 0, 0),
       parcelaMinima: finiteNum(d.parcelaMinima, 0, 0),
@@ -382,13 +426,14 @@ function parseDividas(rawDividas: unknown, fallback: DebtItem[]): DebtItem[] {
 
 function parsePayrollItems(rawItems: unknown, prefix: string, defaultLabel: string, fallback: PayrollItem[]): PayrollItem[] {
   if (!Array.isArray(rawItems)) return fallback;
+  const limited = rawItems.slice(0, MAX_COLLECTION_ITEMS);
   const result: PayrollItem[] = [];
-  for (let idx = 0; idx < rawItems.length; idx++) {
-    const item = rawItems[idx];
+  for (let idx = 0; idx < limited.length; idx++) {
+    const item = limited[idx];
     if (!item || typeof item !== 'object') continue;
     result.push({
-      id: String(item.id || `${prefix}_${idx + 1}`),
-      nome: String(item.nome || item.descricao || defaultLabel),
+      id: safeStr(item.id, `${prefix}_${idx + 1}`),
+      nome: safeStr(item.nome, '') || safeStr(item.descricao, defaultLabel),
       valor: finiteNum(item.valor, 0, 0),
     });
   }
@@ -399,34 +444,53 @@ function parseSalario(rawSalario: any, fallback: AppState['salario']): AppState[
   if (!rawSalario || typeof rawSalario !== 'object') return fallback;
   const proventos = parsePayrollItems(rawSalario.proventos, 'p', 'Provento', fallback.proventos);
   const descontos = parsePayrollItems(rawSalario.descontos, 'd', 'Desconto', fallback.descontos);
-  const bruto = proventos.reduce((s, p) => s + p.valor, 0);
-  const descontosTotal = descontos.reduce((s, d) => s + d.valor, 0);
+  const bruto = finiteNum(
+    proventos.reduce((s, p) => s + p.valor, 0),
+    0,
+    0
+  );
+  const descontosTotal = finiteNum(
+    descontos.reduce((s, d) => s + d.valor, 0),
+    0,
+    0
+  );
   return {
     proventos,
     descontos,
     bruto,
     descontosTotal,
-    liquido: Math.max(0, bruto - descontosTotal),
+    liquido: finiteNum(Math.max(0, bruto - descontosTotal), 0, 0),
   };
 }
 
 function parseHistoricoContracheques(rawHist: unknown, fallback: HistoricalPayroll[]): HistoricalPayroll[] {
   if (!Array.isArray(rawHist)) return fallback;
+  const limited = rawHist.slice(0, MAX_COLLECTION_ITEMS);
   const result: HistoricalPayroll[] = [];
-  for (let i = 0; i < rawHist.length; i++) {
-    const h = rawHist[i];
+  for (let i = 0; i < limited.length; i++) {
+    const h = limited[i];
     if (!h || typeof h !== 'object') continue;
     const proventos = parsePayrollItems(h.proventos, 'hp', 'Provento', []);
     const descontos = parsePayrollItems(h.descontos, 'hd', 'Desconto', []);
-    const bruto = finiteNum(h.bruto, proventos.reduce((s, p) => s + p.valor, 0), 0);
-    const descontosTotal = finiteNum(h.descontosTotal, descontos.reduce((s, d) => s + d.valor, 0), 0);
+    const brutoFallback = finiteNum(
+      proventos.reduce((s, p) => s + p.valor, 0),
+      0,
+      0
+    );
+    const descontosFallback = finiteNum(
+      descontos.reduce((s, d) => s + d.valor, 0),
+      0,
+      0
+    );
+    const bruto = finiteNum(h.bruto, brutoFallback, 0);
+    const descontosTotal = finiteNum(h.descontosTotal, descontosFallback, 0);
     const liquido = finiteNum(h.liquido, Math.max(0, bruto - descontosTotal), 0);
     result.push({
-      id: String(h.id || `hist_${i + 1}`),
+      id: safeStr(h.id, `hist_${i + 1}`),
       competencia: typeof h.competencia === 'string' && /^\d{4}-\d{2}$/.test(h.competencia)
         ? h.competencia
         : getLocalMonthKey(),
-      mesLabel: String(h.mesLabel || ''),
+      mesLabel: safeStr(h.mesLabel, ''),
       proventos,
       descontos,
       bruto,
@@ -442,14 +506,15 @@ function parseDespesasMolde(
   fallback: RecurringExpenseTemplate[]
 ): RecurringExpenseTemplate[] {
   if (!Array.isArray(rawMolde)) return fallback;
+  const limited = rawMolde.slice(0, MAX_COLLECTION_ITEMS);
   const result: RecurringExpenseTemplate[] = [];
-  for (let i = 0; i < rawMolde.length; i++) {
-    const m = rawMolde[i];
+  for (let i = 0; i < limited.length; i++) {
+    const m = limited[i];
     if (!m || typeof m !== 'object') continue;
     const categoria = VALID_EXPENSE_CATEGORIES.has(m.categoria) ? m.categoria : 'Moradia';
     result.push({
-      id: String(m.id || `m_${i + 1}`),
-      descricao: String(m.descricao || 'Despesa Fixa'),
+      id: safeStr(m.id, `m_${i + 1}`),
+      descricao: safeStr(m.descricao, 'Despesa Fixa'),
       valorPadrao: finiteNum(m.valorPadrao, 0, 0),
       diaVencimento: Math.trunc(finiteNum(m.diaVencimento, 10, 1, 31)),
       categoria,
@@ -464,26 +529,26 @@ function parseSingleExpenseItem(d: any, compKey: string, idx: number): ExpenseIt
   const natureza = d.natureza === 'essencial' || d.natureza === 'estilo_vida' ? d.natureza : undefined;
   const parcelaAtual =
     d.parcelaAtual !== undefined && d.parcelaAtual !== null
-      ? Math.max(1, Math.trunc(finiteNum(d.parcelaAtual, 1, 1)))
+      ? Math.trunc(finiteNum(d.parcelaAtual, 1, 1, MAX_INSTALLMENTS))
       : undefined;
   const totalParcelas =
     d.totalParcelas !== undefined && d.totalParcelas !== null
-      ? Math.max(1, Math.trunc(finiteNum(d.totalParcelas, 1, 1)))
+      ? Math.trunc(finiteNum(d.totalParcelas, 1, 1, MAX_INSTALLMENTS))
       : undefined;
-  const grupoParcelamentoId = d.grupoParcelamentoId ? String(d.grupoParcelamentoId) : undefined;
+  const grupoParcelamentoId = safeStr(d.grupoParcelamentoId, '') || undefined;
   return {
-    id: String(d.id || `d_${compKey.replace('-', '')}_${idx + 1}`),
-    moldeId: d.moldeId ? String(d.moldeId) : null,
-    descricao: String(d.descricao || 'Despesa'),
+    id: safeStr(d.id, `d_${compKey.replace('-', '')}_${idx + 1}`),
+    moldeId: safeStr(d.moldeId, '') || null,
+    descricao: safeStr(d.descricao, 'Despesa'),
     valor: finiteNum(d.valor, 0, 0),
     diaVencimento: Math.trunc(finiteNum(d.diaVencimento, 10, 1, 31)),
     paga: Boolean(d.paga),
     categoria,
     natureza,
-    dataPagamento: d.dataPagamento ? String(d.dataPagamento) : null,
-    contaOrigem: d.contaOrigem ? String(d.contaOrigem) : null,
-    contaOrigemId: d.contaOrigemId ? String(d.contaOrigemId) : null,
-    formaPagamento: d.formaPagamento ? String(d.formaPagamento) : undefined,
+    dataPagamento: safeStr(d.dataPagamento, '') || null,
+    contaOrigem: safeStr(d.contaOrigem, '') || null,
+    contaOrigemId: safeStr(d.contaOrigemId, '') || null,
+    formaPagamento: safeStr(d.formaPagamento, '') || undefined,
     ...(parcelaAtual !== undefined ? { parcelaAtual } : {}),
     ...(totalParcelas !== undefined ? { totalParcelas } : {}),
     ...(grupoParcelamentoId !== undefined ? { grupoParcelamentoId } : {}),
@@ -494,13 +559,14 @@ function parseDespesasPorMes(
   rawMeses: any,
   fallback: Record<string, ExpenseItem[]>
 ): Record<string, ExpenseItem[]> {
-  if (!rawMeses || typeof rawMeses !== 'object') return fallback;
+  if (!rawMeses || typeof rawMeses !== 'object' || Array.isArray(rawMeses)) return fallback;
   const cleanMes: Record<string, ExpenseItem[]> = {};
-  for (const [k, list] of Object.entries(rawMeses)) {
+  for (const [k, list] of Object.entries(rawMeses).slice(0, MAX_MONTH_BUCKETS)) {
     if (/^\d{4}-\d{2}$/.test(k) && Array.isArray(list)) {
+      const limited = list.slice(0, MAX_COLLECTION_ITEMS);
       const items: ExpenseItem[] = [];
-      for (let idx = 0; idx < list.length; idx++) {
-        const d = list[idx];
+      for (let idx = 0; idx < limited.length; idx++) {
+        const d = limited[idx];
         if (!d || typeof d !== 'object') continue;
         items.push(parseSingleExpenseItem(d, k, idx));
       }
@@ -516,20 +582,21 @@ function parseReceitasPorMes(
 ): Record<string, ExtraIncomeItem[]> {
   if (!rawMeses || typeof rawMeses !== 'object' || Array.isArray(rawMeses)) return fallback;
   const cleanMes: Record<string, ExtraIncomeItem[]> = {};
-  for (const [k, list] of Object.entries(rawMeses)) {
+  for (const [k, list] of Object.entries(rawMeses).slice(0, MAX_MONTH_BUCKETS)) {
     if (/^\d{4}-\d{2}$/.test(k) && Array.isArray(list)) {
+      const limited = list.slice(0, MAX_COLLECTION_ITEMS);
       const items: ExtraIncomeItem[] = [];
-      for (let idx = 0; idx < list.length; idx++) {
-        const r = list[idx];
+      for (let idx = 0; idx < limited.length; idx++) {
+        const r = limited[idx];
         if (!r || typeof r !== 'object') continue;
         items.push({
-          id: String(r.id || `rec_${k.replace('-', '')}_${idx + 1}`),
-          descricao: String(r.descricao || 'Receita Extra'),
+          id: safeStr(r.id, `rec_${k.replace('-', '')}_${idx + 1}`),
+          descricao: safeStr(r.descricao, 'Receita Extra'),
           valor: finiteNum(r.valor, 0, 0),
-          categoria: String(r.categoria || 'Outros'),
-          data: typeof r.data === 'string' && r.data ? r.data : `${k}-01`,
+          categoria: safeStr(r.categoria, 'Outros'),
+          data: typeof r.data === 'string' ? safeStr(r.data, `${k}-01`) : `${k}-01`,
           recebida: Boolean(r.recebida),
-          contaDestinoId: r.contaDestinoId ? String(r.contaDestinoId) : null,
+          contaDestinoId: safeStr(r.contaDestinoId, '') || null,
         });
       }
       cleanMes[k] = items;
@@ -549,7 +616,7 @@ function parseConfigPagamento(
   return {
     tipo: tipoValido,
     diaFixo: Math.trunc(finiteNum(rawCfg.diaFixo, 5, 1, 31)),
-    dataExata: rawCfg.dataExata ? String(rawCfg.dataExata) : null,
+    dataExata: safeStr(rawCfg.dataExata, '') || null,
   };
 }
 
@@ -627,7 +694,29 @@ const RECOGNIZED_IMPORT_KEYS = [
 export function validateImportJson(
   rawText: string
 ): { ok: true; state: AppState } | { ok: false; error: string } {
-  if (typeof rawText !== 'string' || !rawText.trim()) {
+  if (typeof rawText !== 'string') {
+    return { ok: false, error: 'Arquivo vazio ou formato inválido.' };
+  }
+
+  if (rawText.length > MAX_BACKUP_FILE_BYTES) {
+    return {
+      ok: false,
+      error: `O arquivo excede o limite máximo de ${Math.round(MAX_BACKUP_FILE_BYTES / (1024 * 1024))} MB.`,
+    };
+  }
+
+  if (
+    rawText.length > MAX_BACKUP_FILE_BYTES / 4 &&
+    typeof TextEncoder !== 'undefined' &&
+    new TextEncoder().encode(rawText).byteLength > MAX_BACKUP_FILE_BYTES
+  ) {
+    return {
+      ok: false,
+      error: `O arquivo excede o limite máximo de ${Math.round(MAX_BACKUP_FILE_BYTES / (1024 * 1024))} MB.`,
+    };
+  }
+
+  if (!rawText.trim()) {
     return { ok: false, error: 'Arquivo vazio ou formato inválido.' };
   }
 

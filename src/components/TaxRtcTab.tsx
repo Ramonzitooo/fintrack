@@ -26,6 +26,7 @@ import {
   RTC_REDUCTION_PRESETS,
   RTC_TRANSITION_SCHEDULE,
   RtcReductionPresetId,
+  sanitizeNfseXmlForLocalService,
   SIMPLES_ANEXOS,
   SimplesAnexo,
   SimplesRtcModo,
@@ -236,10 +237,15 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
 
   const handleGenerateOfficialDanfsePdf = async () => {
     if (!xmlText.trim() || !parsedNfse?.ok) return;
+    const sanitized = sanitizeNfseXmlForLocalService(xmlText);
+    if (!sanitized.ok) {
+      setPdfFeedback({ type: 'error', message: sanitized.error });
+      return;
+    }
     setPdfBusy(true);
     setPdfFeedback(null);
     try {
-      const result = await generateOfficialDanfsePdfLocal(endpoints.geradorDanfse, xmlText);
+      const result = await generateOfficialDanfsePdfLocal(endpoints.geradorDanfse, sanitized.xml);
       if (!result.ok) {
         setPdfFeedback({ type: 'error', message: result.error });
         return;
@@ -417,7 +423,7 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                   step="0.01"
                   value={regValorOperacao}
                   onChange={(e) => setRegValorOperacao(e.target.value)}
-                  className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white privacy-val"
                 />
               </div>
 
@@ -486,7 +492,7 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                     step="0.01"
                     value={regCreditos}
                     onChange={(e) => setRegCreditos(e.target.value)}
-                    className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white"
+                    className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white privacy-val"
                   />
                 </div>
 
@@ -676,7 +682,7 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                     step="0.01"
                     value={simpFaturamento}
                     onChange={(e) => setSimpFaturamento(e.target.value)}
-                    className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white"
+                    className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white privacy-val"
                   />
                 </div>
 
@@ -694,7 +700,7 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                     step="0.01"
                     value={simpRbt12}
                     onChange={(e) => setSimpRbt12(e.target.value)}
-                    className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white"
+                    className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white privacy-val"
                   />
                 </div>
               </div>
@@ -742,7 +748,7 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                   step="0.01"
                   value={simpFolha12m}
                   onChange={(e) => setSimpFolha12m(e.target.value)}
-                  className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums text-slate-900 dark:text-white privacy-val"
                 />
                 {simpResult.migradoPorFatorR && (
                   <div
@@ -983,7 +989,7 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                   setPdfFeedback(null);
                 }}
                 placeholder="<NFSe>...</NFSe> ou <CompNfse>...</CompNfse>"
-                className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                className="w-full rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-600 privacy-val"
               />
             </div>
           </div>
@@ -1042,10 +1048,10 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 block">
                         Prestador de Serviços
                       </span>
-                      <p className="font-semibold text-slate-900 dark:text-white mt-0.5 break-words">
+                      <p className="font-semibold text-slate-900 dark:text-white mt-0.5 break-words privacy-val">
                         {parsedNfse.data.prestadorNome || 'Não informado'}
                       </p>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums mt-0.5">
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums mt-0.5 privacy-val">
                         {formatDocumentId(parsedNfse.data.prestadorCnpj)}
                       </p>
                     </div>
@@ -1054,10 +1060,10 @@ export const TaxRtcTab: React.FC<TaxRtcTabProps> = ({ competenciaAtual, onLaunch
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 dark:text-slate-400 block">
                         Tomador de Serviços
                       </span>
-                      <p className="font-semibold text-slate-900 dark:text-white mt-0.5 break-words">
+                      <p className="font-semibold text-slate-900 dark:text-white mt-0.5 break-words privacy-val">
                         {parsedNfse.data.tomadorNome || 'Não informado'}
                       </p>
-                      <p className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums mt-0.5">
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 tabular-nums mt-0.5 privacy-val">
                         {formatDocumentId(parsedNfse.data.tomadorDocumento)}
                       </p>
                     </div>
