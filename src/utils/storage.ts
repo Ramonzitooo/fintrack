@@ -262,7 +262,7 @@ const VALID_CARD_BENEFITS: ReadonlySet<CreditCard['beneficio']> = new Set([
   'SemAnuidade',
 ]);
 
-const VALID_EXPENSE_CATEGORIES: ReadonlySet<ExpenseItem['categoria']> = new Set([
+const VALID_EXPENSE_CATEGORIES: ReadonlySet<string> = new Set([
   'Moradia',
   'Conectividade',
   'Utilidades',
@@ -273,6 +273,7 @@ const VALID_EXPENSE_CATEGORIES: ReadonlySet<ExpenseItem['categoria']> = new Set(
   'Lazer',
   'Imprevisto',
   'Educação',
+  'Impostos',
   'Outros',
 ]);
 

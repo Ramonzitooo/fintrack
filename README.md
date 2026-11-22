@@ -25,7 +25,7 @@
 
 ## 🧩 Ferramentas e Módulos do FinTrack
 
-O **FinTrack** organiza sua vida financeira em **6 abas operacionais**, uma central de **Diagnóstico Técnico**, **Command Palette (`Ctrl + K`)** e **Modo Privacidade (`P`)**:
+O **FinTrack** organiza sua vida financeira em **6 abas operacionais** (mais a **7ª aba opcional de Impostos & Reforma Tributária — RTC**), uma central de **Diagnóstico Técnico**, **Command Palette (`Ctrl + K`)** e **Modo Privacidade (`P`)**:
 
 ### 1. 📊 Visão Geral (Cockpit Executivo & Orçamento 50/30/20)
 - **KPIs em Tempo Real**: Saldo Livre Real (bancos menos contas pendentes), Patrimônio Líquido Consolidado, Cobertura de Reserva (em meses) e **Teto Antifrágil da Diária Segura** até o próximo pagamento.
@@ -56,9 +56,16 @@ O **FinTrack** organiza sua vida financeira em **6 abas operacionais**, uma cent
 - **Simulador de Quitação de Dívidas (*Avalanche* vs. *Bola de Neve*)**: Compara matematicamente *Avalanche* (maior taxa de juros) contra *Bola de Neve* (menor saldo), exibindo prazo total, ordem de quitação e economia de juros.
 - **Command Palette (`Ctrl + K`)**: Lançamento rápido por linguagem natural (ex.: `"almoço 45,90 pix"`).
 
-### 7. 🔒 Privacidade & Blindagem Zero-Knowledge
+### 7. ⚖️ Impostos & Reforma Tributária (RTC) — Aba Opcional
+- **Regime Regular (CBS / IBS / IS 2026–2033)**: Simulador determinístico da transição da Reforma Tributária do Consumo com alíquotas por ano-calendário, regimes diferenciados e apuração líquida de débitos/créditos.
+- **Simples Nacional (Anexos I–V + Fator R)**: Cálculo progressivo de faixa, alíquota efetiva e enquadramento automático entre Anexo III e Anexo V via **Fator R** ($\ge 28\%$).
+- **Leitor de XML NFS-e / DANFSe (100% Offline)**: Parser local de documentos fiscais eletrônicos direto no navegador, sem envio de dados a servidores externos.
+- **Conector Local Opt-In (Receita Federal MIT)**: Integração estritamente opcional com os 3 repositórios oficiais MIT da Receita Federal executados localmente em `http://localhost:8080`, `http://localhost:8081` e `http://localhost:8082` (liberados na CSP apenas para `localhost` / `127.0.0.1`, mantendo bloqueio total a domínios externos).
+- **Lançamento Direto em Despesas**: Converte a guia ou tributo apurado em lançamento na aba **Despesas** em 1 clique.
+
+### 8. 🔒 Privacidade & Blindagem Zero-Knowledge
 - **Cofre Zero-Knowledge AES-256-GCM (Ativo na v4 React)**: Cifragem em repouso no `localStorage` via WebCrypto API (PBKDF2-HMAC-SHA256 com 600.000 iterações, chaves `extractable: false`, Recovery Key de 120 bits e auto-lock por inatividade), com exportação/importação `.vault` interoperável com a versão v3.4 (`public/app.html`).
-- **PWA Offline-First Blindado**: Instalável offline via Service Worker + Manifesto, protegido por **Content Security Policy (CSP)** estrita e **zero fontes externas** (sem requisições a CDNs externos).
+- **PWA Offline-First Blindado**: Instalável offline via Service Worker + Manifesto, protegido por **Content Security Policy (CSP)** estrita (`connect-src 'self' http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'`) — bloqueio total a domínios externos e **zero fontes externas**.
 - **Modo Privacidade (atalho `P`)**: Borra todos os valores monetários com desfoque óptico (`Quick-Peek` ao passar o mouse).
 - **Backups Seguros**: Exportação/importação `.json`, `.csv` e `.vault` com proteção contra **Prototype Pollution** e **CSV Formula Injection (CWE-1236)**.
 
@@ -82,8 +89,8 @@ O **FinTrack** é uma aplicação de planejamento financeiro e gestão patrimoni
 
 ## Subdirectories & System Boundaries
 
-- **Aplicação React (`src`)**: [`./src/README.md`](./src/README.md) — Orquestrador central (`App.tsx`), roteamento acessível entre 6 abas canônicas, atalhos globais de teclado e sincronização de estado.
-  - **Componentes de Interface (`src/components`)**: [`./src/components/README.md`](./src/components/README.md) — Views modulares das abas financeiras (`OverviewTab`, `BanksTab`, `GoalsTab`, `PayrollTab`, `CardsTab`, `ExpensesTab`), diagnóstico técnico (`AuditDiagnosticView`) e os 15 modais interativos (`AppModals`).
+- **Aplicação React (`src`)**: [`./src/README.md`](./src/README.md) — Orquestrador central (`App.tsx`), roteamento acessível entre as 6 abas canônicas e a 7ª aba opcional **Impostos & RTC**, atalhos globais de teclado e sincronização de estado.
+  - **Componentes de Interface (`src/components`)**: [`./src/components/README.md`](./src/components/README.md) — Views modulares das abas financeiras (`OverviewTab`, `BanksTab`, `GoalsTab`, `PayrollTab`, `CardsTab`, `ExpensesTab` e a 7ª aba opcional **Impostos & RTC**), diagnóstico técnico (`AuditDiagnosticView`) e os modais interativos (`AppModals`).
   - **Utilitários, Criptografia & Matemática (`src/utils`)**: [`./src/utils/README.md`](./src/utils/README.md) — Motor determinístico de matemática financeira (`financeMath.ts`), Cofre Zero-Knowledge AES-256-GCM (`cryptoVault.ts`), física de gestos e camada de persistência blindada (`storage.ts`).
 - **Scripts de Empacotamento (`scripts`)**: [`./scripts/README.md`](./scripts/README.md) — Compilador pós-build (`build-standalone.js`) que embute CSS e JS do Vite em um único arquivo HTML autocontido (`./app.html` e `dist/standalone.html`).
 

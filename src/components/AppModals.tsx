@@ -1415,6 +1415,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   <option value="Utilidades">Utilidades (50%)</option>
                   <option value="Saúde">Saúde (50%)</option>
                   <option value="Educação">Educação (50%)</option>
+                  <option value="Impostos">Impostos (50%)</option>
                   <option value="Lazer">Lazer (30%)</option>
                   <option value="Assinaturas">Assinaturas (30%)</option>
                   <option value="Imprevisto">Imprevisto (30%)</option>

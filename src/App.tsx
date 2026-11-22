@@ -57,6 +57,7 @@ import { ActiveModalType, AppModals, QuickEditConfig } from './components/AppMod
 const AuditDiagnosticView = lazy(() =>
   import('./components/AuditDiagnosticView').then((m) => ({ default: m.AuditDiagnosticView }))
 );
+const TaxRtcTab = lazy(() => import('./components/TaxRtcTab'));
 import {
   Eye,
   EyeOff,
@@ -69,6 +70,7 @@ import {
   ClipboardCheck,
   Lock,
   Shield,
+  Scale,
 } from 'lucide-react';
 
 const genId = (prefix: string) =>
@@ -1150,6 +1152,54 @@ export default function App() {
     showToast('Planilha CSV exportada com proteção anti-injeção.');
   };
 
+  const handleLaunchTaxExpense = (payload: {
+    descricao: string;
+    valor: number;
+    categoria: 'Impostos';
+  }) => {
+    const safeValor = Math.max(0, Number(payload.valor) || 0);
+    if (safeValor <= 0) {
+      showToast('Informe um valor de tributo maior que zero para lançar em Despesas.');
+      return;
+    }
+    const comp = state.competenciaAtual;
+    const snapshotDespesas = structuredClone(state.despesasPorMes[comp] || []);
+    const newExp: ExpenseItem = {
+      id: genId('d'),
+      moldeId: null,
+      descricao: payload.descricao.trim() || 'Tributo RTC',
+      valor: safeValor,
+      diaVencimento: 20,
+      categoria: payload.categoria,
+      natureza: 'essencial',
+      paga: false,
+      dataPagamento: null,
+      contaOrigem: null,
+      contaOrigemId: null,
+    };
+
+    setState((prev) => ({
+      ...prev,
+      despesasPorMes: {
+        ...prev.despesasPorMes,
+        [comp]: [...(prev.despesasPorMes[comp] || []), newExp],
+      },
+    }));
+
+    showToast(
+      `Tributo "${newExp.descricao}" (${fmtBRL(safeValor)}) lançado em Despesas (${formatMonthYear(comp)}).`,
+      () => {
+        setState((prev) => ({
+          ...prev,
+          despesasPorMes: {
+            ...prev.despesasPorMes,
+            [comp]: snapshotDespesas,
+          },
+        }));
+      }
+    );
+  };
+
   const navItems = [
     { id: 'visao-geral', label: 'Visão Geral' },
     { id: 'bancos', label: 'Bancos & Saldos' },
@@ -1157,6 +1207,7 @@ export default function App() {
     { id: 'contracheque', label: 'Contracheque' },
     { id: 'cartoes', label: 'Cartões' },
     { id: 'despesas', label: 'Despesas' },
+    { id: 'impostos', label: 'Impostos (RTC)' },
   ];
 
   const handleTabKeyDown = (
@@ -1291,7 +1342,7 @@ export default function App() {
             role="tablist"
             aria-label="Navegação principal"
             aria-orientation="horizontal"
-            className="hidden md:flex items-center gap-6 py-1"
+            className="hidden md:flex items-center gap-4 lg:gap-5 py-1 overflow-x-auto"
           >
             {navItems.map((item, idx) => {
               const active = activeTab === item.id;
@@ -1308,13 +1359,16 @@ export default function App() {
                   tabIndex={active ? 0 : -1}
                   onClick={() => setActiveTab(item.id)}
                   onKeyDown={(e) => handleTabKeyDown(e, idx, desktopTabRefs)}
-                  className={`relative text-sm font-semibold whitespace-nowrap shrink-0 pb-1.5 transition-colors cursor-pointer ${
+                  className={`relative min-h-[44px] inline-flex items-center gap-1.5 text-sm font-semibold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                     active
                       ? 'text-emerald-700 dark:text-emerald-400'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                   }`}
                 >
-                  {item.label}
+                  {item.id === 'impostos' && (
+                    <Scale className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                  <span>{item.label}</span>
                   {active && (
                     <motion.span
                       layoutId="desktop-tab-indicator"
@@ -1323,7 +1377,7 @@ export default function App() {
                           ? { duration: 0.1 }
                           : { type: 'spring', bounce: 0, duration: 0.35 }
                       }
-                      className="absolute inset-x-0 bottom-0 h-0.5 rounded-full bg-emerald-600 dark:bg-emerald-400"
+                      className="absolute inset-x-0 bottom-1 h-0.5 rounded-full bg-emerald-600 dark:bg-emerald-400"
                     />
                   )}
                 </button>
@@ -1387,7 +1441,7 @@ export default function App() {
                 tabIndex={active ? 0 : -1}
                 onClick={() => setActiveTab(item.id)}
                 onKeyDown={(e) => handleTabKeyDown(e, idx, mobileTabRefs)}
-                className={`relative px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                className={`relative min-h-[44px] inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
                   active
                     ? 'text-white dark:text-slate-900'
                     : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-800'
@@ -1403,6 +1457,9 @@ export default function App() {
                     }
                     className="absolute inset-0 rounded-lg bg-slate-900 dark:bg-white -z-10"
                   />
+                )}
+                {item.id === 'impostos' && (
+                  <Scale className="relative z-10 w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                 )}
                 <span className="relative z-10">{item.label}</span>
               </button>
@@ -1787,6 +1844,25 @@ export default function App() {
               });
             }}
           />
+        )}
+
+        {activeTab === 'impostos' && (
+          <Suspense
+            fallback={
+              <div
+                role="status"
+                aria-live="polite"
+                className="p-12 text-center text-xs text-slate-500 dark:text-slate-400"
+              >
+                Carregando simulador de Impostos (RTC)...
+              </div>
+            }
+          >
+            <TaxRtcTab
+              competenciaAtual={state.competenciaAtual}
+              onLaunchTaxExpense={handleLaunchTaxExpense}
+            />
+          </Suspense>
         )}
         </motion.div>
       </main>

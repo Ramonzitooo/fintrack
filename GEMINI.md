@@ -84,7 +84,7 @@ O FinTrack adota a especificação **Google Material 3 (M3 Expressive)** enrique
 
 ## 4. Estrutura de Telas, Navegação e Modais
 
-A navegação primária organiza o ciclo financeiro do usuário em **6 abas canônicas**, complementadas por um **Command Palette global (`Ctrl+K`)** e **modais de operação assistida**.
+A navegação primária organiza o ciclo financeiro do usuário em **6 abas canônicas** mais uma **7ª aba opcional (Impostos & Reforma Tributária — RTC)**, complementadas por um **Command Palette global (`Ctrl+K`)** e **modais de operação assistida**.
 
 ```
 [ HEADER SUPERIOR ] ──► Logo | Status Sync | Busca (Ctrl+K) | Privacidade | Cofre | Tema | Backup
@@ -95,10 +95,11 @@ A navegação primária organiza o ciclo financeiro do usuário em **6 abas can�
       ├── 3. Caixinhas & Aposentadoria (Metas & FIRE)
       ├── 4. Contracheque (Folha, Horas de Vida & Deduções)
       ├── 5. Cartões (Melhor Cartão & Simulador CDI)
-      └── 6. Despesas (Lançamentos, Envelopes & Molde)
+      ├── 6. Despesas (Lançamentos, Envelopes & Molde)
+      └── 7. Impostos & RTC [Opcional] (CBS/IBS/IS, Simples, XML NFS-e/DANFSe)
 ```
 
-### 4.1. As 6 Abas Principais
+### 4.1. As 6 Abas Principais (+ 7ª Aba Opcional RTC)
 
 1. **Visão Geral (`tab-visao-geral`):**
    * **Cockpit Vital:** Cards consolidados de Salário Líquido, Contas Fixas do Mês, Patrimônio Guardado em Caixinhas e Saldo Livre Real com Badge de Saúde de Caixa (Saudável, Apertado ou Negativo).
@@ -142,6 +143,13 @@ A navegação primária organiza o ciclo financeiro do usuário em **6 abas can�
    * **Lançamento Rápido em 1 Toque:** Chips ergonômicos com atalhos de valor (R$ 15, R$ 30, R$ 50, R$ 100, R$ 200).
    * **Molde de Despesas Fixas Recorrentes:** Cadastro de despesas molde (aluguel, condomínio, internet, luz) que são replicadas automaticamente a cada nova competência mensal.
    * Listagem de lançamentos com **edição inline (CRUD)**, status de quitação (Paga/Pendente), filtro por categorias e estorno automático com recomposição do saldo da conta bancária de débito.
+
+7. **Impostos & Reforma Tributária (RTC) — Aba Opcional:**
+   * **Regime Regular (CBS / IBS / IS 2026–2033):** Simulador determinístico da transição da Reforma Tributária do Consumo com alíquotas de referência por ano-calendário, regimes diferenciados e apuração de débitos/créditos.
+   * **Simples Nacional (Anexos I–V + Fator R):** Cálculo progressivo por faixa de receita bruta acumulada (RBT12), alíquota efetiva e verificação automática de enquadramento entre Anexo III e Anexo V via **Fator R** ($\ge 28\%$).
+   * **Leitor de XML NFS-e / DANFSe (100% Offline):** Parsing local de notas fiscais de serviço eletrônicas diretamente no navegador, sem upload externo.
+   * **Conector Local Opt-In (Receita Federal MIT):** Integração estritamente opcional com os 3 repositórios oficiais MIT da Receita Federal rodando localmente em `http://localhost:8080`, `http://localhost:8081` e `http://localhost:8082`. A diretiva CSP (`connect-src 'self' http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'none'`) permite apenas comunicação local de loopback, preservando bloqueio total a domínios externos.
+   * **Lançamento Direto em Despesas:** Envia o tributo ou guia apurada diretamente para a aba **Despesas** na competência ativa.
 
 ---
 
@@ -287,7 +295,7 @@ PROJETOS/APPS/APP FINANCEIRO/
 │   ├── index.css                # Tokens M3 Expressive, Apple Fluid Design e Tailwind v4
 │   ├── main.tsx                 # Ponto de entrada React
 │   ├── README.md                # Contrato EGM do pacote src
-│   ├── components/              # Componentes das 6 abas, modais (AppModals) e diagnóstico
+│   ├── components/              # Componentes das 6 abas principais + 7ª aba opcional Impostos & RTC, modais (AppModals) e diagnóstico
 │   └── utils/                   # Matemática financeira (financeMath.ts), Cofre AES-256-GCM (cryptoVault.ts), persistência (storage.ts) e 37 testes unitários TS (28 financeMath + 9 cryptoVault)
 ├── scripts/
 │   └── build-standalone.js      # Empacotador do bundle autocontido (dist/standalone.html e app.html)

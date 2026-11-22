@@ -33,6 +33,7 @@ const EXPENSE_CATEGORIES: ExpenseItem['categoria'][] = [
   'Lazer',
   'Imprevisto',
   'Educação',
+  'Impostos',
   'Outros',
 ];
 

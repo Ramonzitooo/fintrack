@@ -46,6 +46,7 @@ export interface ExpenseItem {
     | 'Lazer'
     | 'Imprevisto'
     | 'Educação'
+    | 'Impostos'
     | 'Outros';
   natureza?: 'essencial' | 'estilo_vida';
   dataPagamento: string | null;
@@ -345,7 +346,7 @@ export function calculateFireProjection(
 
 /**
  * Classifica automaticamente se uma categoria de despesa pertence a:
- * - Necessidades Essenciais (50%): Moradia, Alimentação, Saúde, Transporte, Utilidades, Conectividade, Educação
+ * - Necessidades Essenciais (50%): Moradia, Alimentação, Saúde, Transporte, Utilidades, Conectividade, Educação, Impostos
  * - Desejos / Estilo de Vida (30%): Lazer, Assinaturas, Imprevisto, Outros
  */
 export function isEssentialCategory(categoria: ExpenseItem['categoria'], naturezaOverride?: 'essencial' | 'estilo_vida'): boolean {
@@ -359,6 +360,7 @@ export function isEssentialCategory(categoria: ExpenseItem['categoria'], naturez
     'Utilidades',
     'Conectividade',
     'Educação',
+    'Impostos',
   ]);
   return essentialSet.has(categoria);
 }
