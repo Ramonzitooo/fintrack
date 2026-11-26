@@ -2,21 +2,26 @@ import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import {
   AppState,
+  createBackupEnvelopeV41,
+  createDemoSampleState,
   DEFAULT_STATE,
   fmtBRL,
   formatMonthYear,
+  getDaysSinceLastBackup,
   getLocalDateKey,
   getLocalMonthKey,
+  LAST_BACKUP_AT_KEY,
   loadAppStateDetailed,
   MAX_BACKUP_FILE_BYTES,
   normalizeState,
+  recordBackupTimestamp,
   safeGetStorageItem,
   safeJsonParse,
   safeSetStorageItem,
   sanitizeCsvCell,
   saveAppState,
   STORAGE_KEY,
-  validateImportJson,
+  verifyAndImportBackupJson,
 } from './utils/storage';
 import {
   addMoney,
@@ -49,6 +54,7 @@ import {
   encryptWithVaultSession,
   isEncryptedVaultEnvelope,
   loadVaultSessionConfig,
+  rotateVaultMasterPassword,
   saveVaultSessionConfig,
   unlockVaultWithSession,
   VAULT_SESSION_CONFIG_KEY,
@@ -123,6 +129,7 @@ export default function App() {
     return typeof window !== 'undefined' && (window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false);
   });
   const [toast, setToast] = useState<{ message: string; onUndo?: () => void } | null>(null);
+  const [daysSinceBackup, setDaysSinceBackup] = useState<number | null>(() => getDaysSinceLastBackup());
   const shouldReduceMotion = useReducedMotion();
   const desktopTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const mobileTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -360,6 +367,8 @@ export default function App() {
         }
       } else if (e.key === VAULT_SESSION_CONFIG_KEY) {
         setVaultConfig(loadVaultSessionConfig());
+      } else if (e.key === LAST_BACKUP_AT_KEY) {
+        setDaysSinceBackup(getDaysSinceLastBackup());
       } else if (e.key === 'FINTRACK_PRIVACIDADE') {
         setPrivacyMode(e.newValue === '1');
       } else if (e.key === 'FINTRACK_M3_THEME') {
@@ -1232,6 +1241,60 @@ export default function App() {
     );
   };
 
+  const handleRotateVaultPassword = async (
+    currentSecret: string,
+    newPassword: string
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const session = vaultSessionRef.current;
+    if (!session || isVaultLockedRef.current || !currentSecret.trim()) {
+      return {
+        ok: false,
+        error: 'Desbloqueie o cofre e informe sua credencial atual para rotacionar a senha.',
+      };
+    }
+
+    try {
+      const currentEnvelope = await encryptWithVaultSession(latestStateRef.current, session);
+      const rotated = await rotateVaultMasterPassword<AppState>(
+        currentEnvelope,
+        currentSecret,
+        newPassword
+      );
+      encryptSeqRef.current += 1;
+      const saved = safeSetStorageItem(STORAGE_KEY, JSON.stringify(rotated.envelope));
+      if (!saved) {
+        return {
+          ok: false,
+          error: 'Não foi possível salvar o novo cofre. Exporte um backup e libere espaço no navegador antes de tentar novamente.',
+        };
+      }
+
+      vaultSessionRef.current = rotated.session;
+      dirtyVaultPersistRef.current = false;
+      lastActivityAtRef.current = Date.now();
+      setLastGeneratedRecoveryKey(rotated.newRecoveryKey);
+      showToast('Senha mestra rotacionada. Guarde a nova Recovery Key gerada.');
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        error: 'Não foi possível rotacionar a senha. Verifique a credencial atual e tente novamente.',
+      };
+    }
+  };
+
+  const handleLoadDemoData = () => {
+    const snapshot = structuredClone(latestStateRef.current);
+    const demoState = createDemoSampleState(state.competenciaAtual);
+    latestStateRef.current = demoState;
+    setState(demoState);
+    setActiveTab('visao-geral');
+    showToast('Cenário de demonstração carregado. Você pode restaurar os dados anteriores.', () => {
+      latestStateRef.current = snapshot;
+      setState(snapshot);
+    });
+  };
+
   const handleExportVault = async () => {
     if (!vaultSessionRef.current) {
       showToast('Ative ou desbloqueie o cofre para exportar um backup cifrado .vault.');
@@ -1247,6 +1310,8 @@ export default function App() {
       a.download = `fintrack_vault_${dataIso}.vault`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
+      recordBackupTimestamp();
+      setDaysSinceBackup(0);
       showToast('Backup cifrado .vault exportado.');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro ao exportar backup .vault.');
@@ -1311,16 +1376,23 @@ export default function App() {
     }
   };
 
-  const handleExportJSON = () => {
-    const dataIso = getLocalDateKey();
-    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `fintrack_backup_${dataIso}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    showToast('Backup JSON exportado.');
+  const handleExportJSON = async () => {
+    try {
+      const envelope = await createBackupEnvelopeV41(state);
+      const dataIso = getLocalDateKey();
+      const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fintrack_backup_${dataIso}.json`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      recordBackupTimestamp(envelope.exportedAt);
+      setDaysSinceBackup(0);
+      showToast('Backup JSON v4.1 exportado com verificação de integridade SHA-256.');
+    } catch {
+      showToast('Não foi possível assinar o backup JSON. Verifique o suporte a WebCrypto e tente novamente.');
+    }
   };
 
   const handleExportCSV = () => {
@@ -1542,7 +1614,7 @@ export default function App() {
             role="tablist"
             aria-label="Navegação principal"
             aria-orientation="horizontal"
-            className="hidden md:flex items-center gap-4 lg:gap-5 py-1 overflow-x-auto"
+            className="hidden xl:flex items-center gap-4 2xl:gap-5 py-1"
           >
             {navItems.map((item, idx) => {
               const active = activeTab === item.id;
@@ -1589,7 +1661,7 @@ export default function App() {
           <div className="shrink-0">
             <button
               onClick={() => setActiveModal('newExpense')}
-              className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Registrar Gasto</span>
@@ -1619,12 +1691,12 @@ export default function App() {
             </button>
           </div>
         )}
-        {/* Mobile Section Switcher (<768px) */}
+        {/* Section Switcher até 1279 px; navegação completa entra apenas quando há espaço. */}
         <div
           role="tablist"
-          aria-label="Seções do aplicativo (Mobile)"
+          aria-label="Seções do aplicativo"
           aria-orientation="horizontal"
-          className="flex md:hidden items-center gap-1.5 overflow-x-auto pb-1 -mx-1 px-1"
+          className="mobile-tabs-scroll flex xl:hidden items-center gap-1.5 overflow-x-auto pb-1 -mx-1 px-1"
         >
           {navItems.map((item, idx) => {
             const active = activeTab === item.id;
@@ -1668,14 +1740,14 @@ export default function App() {
         </div>
 
         {/* Contextual Workspace Toolbar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-slate-200/80 dark:border-slate-800">
+        <div className="flex flex-col gap-3 pb-3 border-b border-slate-200/80 dark:border-slate-800 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center gap-3 flex-wrap">
             <button
               id="tab-diagnostico"
               type="button"
               aria-pressed={activeTab === 'diagnostico'}
               onClick={() => setActiveTab(activeTab === 'diagnostico' ? 'visao-geral' : 'diagnostico')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[44px] px-3 py-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 activeTab === 'diagnostico'
                   ? 'bg-emerald-700 text-white'
                   : 'bg-white dark:bg-slate-900 text-emerald-800 dark:text-emerald-300 border border-slate-200 dark:border-slate-800 hover:bg-emerald-50/50'
@@ -1685,6 +1757,7 @@ export default function App() {
                 className={`w-3.5 h-3.5 ${
                   activeTab === 'diagnostico' ? 'text-white' : 'text-emerald-600 dark:text-emerald-400'
                 }`}
+                aria-hidden="true"
               />
               <span>
                 {activeTab === 'diagnostico'
@@ -1693,21 +1766,21 @@ export default function App() {
               </span>
             </button>
 
-            <span className="text-xs text-slate-500 dark:text-slate-400 hidden md:inline">
+            <span className="text-xs text-slate-500 dark:text-slate-400">
               Competência: <strong className="text-slate-800 dark:text-slate-200">{formatMonthYear(state.competenciaAtual)}</strong>
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               onClick={() => setActiveModal('cmdk')}
               aria-label="Abrir busca e comandos rápidos (Ctrl+K)"
-              className="px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 inline-flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[44px] px-3 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 inline-flex items-center justify-center gap-2 transition-colors cursor-pointer whitespace-nowrap shrink-0 max-sm:flex-1"
             >
-              <Search className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" />
+              <Search className="w-3.5 h-3.5 text-slate-500 dark:text-slate-400" aria-hidden="true" />
               <span>Lançamento Rápido</span>
-              <kbd className="text-[10px] font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+              <kbd className="hidden md:inline text-[10px] font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
                 Ctrl K
               </kbd>
             </button>
@@ -1717,9 +1790,9 @@ export default function App() {
               onClick={() => setPrivacyMode((p) => !p)}
               aria-pressed={privacyMode}
               aria-label={privacyMode ? 'Revelar saldos' : 'Ocultar saldos'}
-              className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[44px] px-2.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              {privacyMode ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              {privacyMode ? <EyeOff className="w-3.5 h-3.5" aria-hidden="true" /> : <Eye className="w-3.5 h-3.5" aria-hidden="true" />}
               <span className="hidden sm:inline">{privacyMode ? 'Saldos Ocultos' : 'Ocultar Saldos'}</span>
             </button>
 
@@ -1728,16 +1801,16 @@ export default function App() {
               onClick={() => setDarkMode((d) => !d)}
               aria-pressed={darkMode}
               aria-label="Alternar tema claro ou escuro"
-              className="p-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              className="min-h-[44px] min-w-[44px] p-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center justify-center transition-colors cursor-pointer"
             >
-              {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {darkMode ? <Sun className="w-4 h-4" aria-hidden="true" /> : <Moon className="w-4 h-4" aria-hidden="true" />}
             </button>
 
             <button
               type="button"
               onClick={() => setActiveModal('vaultSecurity')}
               aria-label="Configurar Cofre Zero-Knowledge"
-              className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`min-h-[44px] px-2.5 py-2 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 vaultActive
                   ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-700 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/50'
                   : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -1751,9 +1824,9 @@ export default function App() {
               type="button"
               onClick={() => setActiveModal('backup')}
               aria-label="Backup e Dados"
-              className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              className="min-h-[44px] px-2.5 py-2 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              <Download className="w-3.5 h-3.5" />
+              <Download className="w-3.5 h-3.5" aria-hidden="true" />
               <span className="hidden sm:inline">Backup</span>
             </button>
           </div>
@@ -1799,6 +1872,7 @@ export default function App() {
               setSelectedId(cxId);
               setActiveModal('aporteGoal');
             }}
+            onLoadDemoData={handleLoadDemoData}
           />
         )}
 
@@ -2073,12 +2147,25 @@ export default function App() {
         selectedId={selectedId}
         state={state}
         privacyMode={privacyMode}
+        darkMode={darkMode}
+        daysSinceBackup={daysSinceBackup}
+        hasRegisteredData={
+          state.bancos.length > 0 ||
+          state.caixinhas.length > 0 ||
+          state.cartoes.length > 0 ||
+          state.salario.liquido > 0 ||
+          Object.values(state.despesasPorMes).some((items) => items.length > 0)
+        }
         quickEditConfig={quickEditConfig}
         onClose={() => {
           setActiveModal(null);
           setQuickEditConfig(null);
         }}
+        onOpenModal={(modal) => setActiveModal(modal)}
         onNavigate={(tab) => setActiveTab(tab)}
+        onTogglePrivacyMode={() => setPrivacyMode((current) => !current)}
+        onToggleDarkMode={() => setDarkMode((current) => !current)}
+        onLoadDemoData={handleLoadDemoData}
         onSaveBank={handleSaveBank}
         onExecutePix={handleExecutePix}
         onSaveGoal={handleSaveGoal}
@@ -2138,6 +2225,21 @@ export default function App() {
           }));
           showToast(`"${descricao}" adicionada ao molde recorrente.`);
         }}
+        onUpdateTemplateItem={(updated) => {
+          const safeUpdated = {
+            ...updated,
+            descricao: updated.descricao.trim() || 'Despesa recorrente',
+            valorPadrao: Math.max(0, Number(updated.valorPadrao) || 0),
+            diaVencimento: Math.max(1, Math.min(31, Math.trunc(Number(updated.diaVencimento) || 1))),
+          };
+          setState((prev) => ({
+            ...prev,
+            despesasFixasMolde: prev.despesasFixasMolde.map((item) =>
+              item.id === safeUpdated.id ? safeUpdated : item
+            ),
+          }));
+          showToast(`Recorrência "${safeUpdated.descricao}" atualizada para os próximos meses.`);
+        }}
         onToggleTemplateItem={(id) => {
           setState((prev) => ({
             ...prev,
@@ -2167,34 +2269,39 @@ export default function App() {
         onExportJSON={handleExportJSON}
         onExportCSV={handleExportCSV}
         onImportJSON={(file) => {
-          if (file.size > MAX_BACKUP_FILE_BYTES) {
-            const maxMb = Math.round(MAX_BACKUP_FILE_BYTES / (1024 * 1024));
-            showToast(
-              `Não foi possível importar o backup JSON. O arquivo excede o limite máximo de ${maxMb} MB. Selecione um arquivo JSON válido exportado pelo FinTrack.`
-            );
-            return;
-          }
-          const reader = new FileReader();
-          reader.onload = (ev) => {
-            const rawText = String(ev.target?.result || '');
-            const result = validateImportJson(rawText);
-            if (result.ok === false) {
+          void (async () => {
+            if (file.size > MAX_BACKUP_FILE_BYTES) {
+              const maxMb = Math.round(MAX_BACKUP_FILE_BYTES / (1024 * 1024));
               showToast(
-                `Não foi possível importar o backup. Motivo: ${result.error} Selecione um arquivo JSON exportado pelo FinTrack.`
+                `Não foi possível importar o backup JSON. O arquivo excede o limite de ${maxMb} MB. Selecione um backup válido exportado pelo FinTrack.`
               );
               return;
             }
-            const snapshot = structuredClone(state);
-            setState(result.state);
-            setStorageWarning(null);
-            showToast('Backup restaurado com sucesso!', () => {
-              setState(snapshot);
-            });
-          };
-          reader.onerror = () => {
-            showToast('Não foi possível ler o arquivo selecionado. Verifique as permissões de leitura e tente novamente.');
-          };
-          reader.readAsText(file);
+
+            try {
+              const result = await verifyAndImportBackupJson(await file.text());
+              if (!result.ok) {
+                showToast(result.error);
+                return;
+              }
+
+              const snapshot = structuredClone(latestStateRef.current);
+              latestStateRef.current = result.state;
+              setState(result.state);
+              setStorageWarning(null);
+              showToast(
+                result.verifiedHash
+                  ? 'Backup restaurado com integridade SHA-256 verificada.'
+                  : 'Backup legado restaurado. Exporte um novo JSON v4.1 para adicionar verificação de integridade.',
+                () => {
+                  latestStateRef.current = snapshot;
+                  setState(snapshot);
+                }
+              );
+            } catch {
+              showToast('Não foi possível ler o backup. Verifique o arquivo e as permissões de leitura antes de tentar novamente.');
+            }
+          })();
         }}
         onResetFactory={() => {
           const snapshot = structuredClone(state);
@@ -2210,6 +2317,7 @@ export default function App() {
         vaultConfig={vaultConfig}
         lastGeneratedRecoveryKey={lastGeneratedRecoveryKey}
         onActivateVault={handleActivateVault}
+        onRotateVaultPassword={handleRotateVaultPassword}
         onDeactivateVault={handleDeactivateVault}
         onUpdateVaultAutoLock={handleUpdateVaultAutoLock}
         onLockVaultNow={() => lockVaultNow()}

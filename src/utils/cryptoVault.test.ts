@@ -5,6 +5,8 @@ import {
   VAULT_ITERATIONS,
   MIN_KDF_ITERATIONS,
   MAX_KDF_ITERATIONS,
+  VAULT_LOCKOUT_STORAGE_KEY,
+  MAX_FREE_UNLOCK_ATTEMPTS,
   deriveVaultKey,
   generateRecoveryKey,
   normalizeRecoveryKey,
@@ -18,6 +20,10 @@ import {
   isEncryptedVaultEnvelope,
   saveVaultSessionConfig,
   loadVaultSessionConfig,
+  getVaultUnlockLockoutState,
+  recordFailedVaultUnlock,
+  resetVaultUnlockLockout,
+  rotateVaultMasterPassword,
   type VaultEnvelope,
   type LegacyVaultEnvelopeV34,
 } from './cryptoVault.ts';
@@ -517,4 +523,261 @@ test('VaultSession guarantees non-extractable CryptoKey and distinct CSPRNG IV o
 
   assert.deepEqual(await decryptVaultPayload<AppState>(envA, password), state);
   assert.deepEqual(await decryptVaultPayload<AppState>(envB, password), state);
+});
+
+test('Anti-brute-force exponential backoff: 4 free failures, 15s on 5th, 30s on 6th, capped at 300s, F5 persistence, time unlock and reset', async () => {
+  assert.equal(VAULT_LOCKOUT_STORAGE_KEY, 'FINTRACK_VAULT_LOCKOUT_V1');
+  assert.equal(MAX_FREE_UNLOCK_ATTEMPTS, 5);
+
+  resetVaultUnlockLockout();
+  const t0 = 1_700_000_000_000;
+
+  assert.deepEqual(getVaultUnlockLockoutState(t0), {
+    failedAttempts: 0,
+    lockedUntilMs: 0,
+    remainingSeconds: 0,
+    isLockedOut: false,
+  });
+
+  // 1ª a 4ª falhas: sem bloqueio (cooldownSeconds = 0)
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const rec = recordFailedVaultUnlock(t0);
+    assert.deepEqual(rec, {
+      failedAttempts: attempt,
+      cooldownSeconds: 0,
+      lockedUntilMs: 0,
+    });
+    assert.deepEqual(getVaultUnlockLockoutState(t0), {
+      failedAttempts: attempt,
+      lockedUntilMs: 0,
+      remainingSeconds: 0,
+      isLockedOut: false,
+    });
+  }
+
+  // 5ª falha: backoff de 15s
+  const fail5 = recordFailedVaultUnlock(t0);
+  assert.deepEqual(fail5, {
+    failedAttempts: 5,
+    cooldownSeconds: 15,
+    lockedUntilMs: t0 + 15_000,
+  });
+  assert.deepEqual(getVaultUnlockLockoutState(t0), {
+    failedAttempts: 5,
+    lockedUntilMs: t0 + 15_000,
+    remainingSeconds: 15,
+    isLockedOut: true,
+  });
+  assert.equal(getVaultUnlockLockoutState(t0 + 7_200).remainingSeconds, 8);
+  assert.equal(getVaultUnlockLockoutState(t0 + 7_200).isLockedOut, true);
+
+  // 6ª falha: backoff de 30s
+  const t1 = t0 + 15_000;
+  const fail6 = recordFailedVaultUnlock(t1);
+  assert.deepEqual(fail6, {
+    failedAttempts: 6,
+    cooldownSeconds: 30,
+    lockedUntilMs: t1 + 30_000,
+  });
+  assert.deepEqual(getVaultUnlockLockoutState(t1), {
+    failedAttempts: 6,
+    lockedUntilMs: t1 + 30_000,
+    remainingSeconds: 30,
+    isLockedOut: true,
+  });
+
+  // Avanço de tempo libera o bloqueio mantendo histórico de tentativas até sucesso
+  const tAfter6 = t1 + 30_000;
+  assert.deepEqual(getVaultUnlockLockoutState(tAfter6), {
+    failedAttempts: 6,
+    lockedUntilMs: t1 + 30_000,
+    remainingSeconds: 0,
+    isLockedOut: false,
+  });
+
+  // Progressão 7ª (60s), 8ª (120s), 9ª (240s), 10ª (300s teto), 11ª (300s teto)
+  assert.equal(recordFailedVaultUnlock(tAfter6).cooldownSeconds, 60);
+  assert.equal(recordFailedVaultUnlock(tAfter6 + 60_000).cooldownSeconds, 120);
+  assert.equal(recordFailedVaultUnlock(tAfter6 + 180_000).cooldownSeconds, 240);
+  assert.equal(recordFailedVaultUnlock(tAfter6 + 420_000).cooldownSeconds, 300);
+  assert.equal(recordFailedVaultUnlock(tAfter6 + 720_000).cooldownSeconds, 300);
+
+  // Reset explícito zera contador e bloqueio
+  resetVaultUnlockLockout();
+  assert.deepEqual(getVaultUnlockLockoutState(tAfter6 + 720_000), {
+    failedAttempts: 0,
+    lockedUntilMs: 0,
+    remainingSeconds: 0,
+    isLockedOut: false,
+  });
+
+  // Persistência em localStorage resistindo a F5/reload + reset automático após unlockVaultWithSession
+  const originalDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const backingStore = new Map<string, string>();
+  const mockStorage: Storage = {
+    get length() {
+      return backingStore.size;
+    },
+    clear() {
+      backingStore.clear();
+    },
+    getItem(key: string) {
+      return backingStore.has(key) ? backingStore.get(key)! : null;
+    },
+    key(index: number) {
+      return Array.from(backingStore.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      backingStore.delete(key);
+    },
+    setItem(key: string, value: string) {
+      backingStore.set(key, String(value));
+    },
+  };
+
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: mockStorage,
+    configurable: true,
+    writable: true,
+  });
+
+  try {
+    resetVaultUnlockLockout();
+    for (let i = 0; i < 5; i++) {
+      recordFailedVaultUnlock(t0);
+    }
+    const persistedRaw = backingStore.get(VAULT_LOCKOUT_STORAGE_KEY);
+    assert.ok(persistedRaw);
+    assert.deepEqual(JSON.parse(persistedRaw), {
+      failedAttempts: 5,
+      lockedUntilMs: t0 + 15_000,
+    });
+
+    // Simula F5/reload lendo estado diretamente do storage persistido
+    backingStore.set(
+      VAULT_LOCKOUT_STORAGE_KEY,
+      JSON.stringify({ failedAttempts: 7, lockedUntilMs: t0 + 60_000 })
+    );
+    assert.deepEqual(getVaultUnlockLockoutState(t0), {
+      failedAttempts: 7,
+      lockedUntilMs: t0 + 60_000,
+      remainingSeconds: 60,
+      isLockedOut: true,
+    });
+
+    // Desbloqueio bem-sucedido chama resetVaultUnlockLockout automaticamente
+    const state = buildSampleAppState();
+    const pwd = 'SenhaCorretaReset#2026';
+    const env = await encryptVaultPayload(state, pwd);
+    await unlockVaultWithSession<AppState>(env, pwd);
+
+    assert.equal(backingStore.has(VAULT_LOCKOUT_STORAGE_KEY), false);
+    assert.deepEqual(getVaultUnlockLockoutState(t0), {
+      failedAttempts: 0,
+      lockedUntilMs: 0,
+      remainingSeconds: 0,
+      isLockedOut: false,
+    });
+  } finally {
+    resetVaultUnlockLockout();
+    if (originalDescriptor) {
+      Object.defineProperty(globalThis, 'localStorage', originalDescriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, 'localStorage');
+    }
+  }
+});
+
+test('rotateVaultMasterPassword rotates secret in-memory, invalidates old password & old Recovery Key, and unlocks with new password & new Recovery Key', async () => {
+  const state = buildSampleAppState();
+  const oldPassword = 'SenhaAntiga#2026!';
+  const oldRecoveryKey = generateRecoveryKey();
+  const newPassword = 'NovaSenhaForte#2027!';
+
+  const { envelope: oldEnvelope } = await createVaultSession(state, oldPassword, oldRecoveryKey);
+
+  // Rejeita nova senha curta (< 8 chars)
+  await assert.rejects(
+    () => rotateVaultMasterPassword<AppState>(oldEnvelope, oldPassword, 'curta77'),
+    /mínimo 8 caracteres/i
+  );
+
+  // Rejeita se currentSecret estiver incorreta (sem vazar dados em claro)
+  await assert.rejects(
+    () => rotateVaultMasterPassword<AppState>(oldEnvelope, 'CredencialErrada#99', newPassword),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal(err.message.includes('Nubank'), false);
+      assert.equal(err.message.includes('4250'), false);
+      return true;
+    }
+  );
+
+  // Rotaciona com sucesso via Senha Mestra atual
+  const rotated = await rotateVaultMasterPassword<AppState>(oldEnvelope, oldPassword, newPassword);
+
+  assert.deepEqual(rotated.data, state);
+  assert.equal(rotated.session.vaultKey.extractable, false);
+  assert.equal(rotated.envelope.__vault, true);
+  assert.equal(rotated.envelope.version, '4.0');
+  assert.notEqual(rotated.envelope.salt, oldEnvelope.salt);
+  assert.notEqual(rotated.envelope.iv, oldEnvelope.iv);
+  assert.ok(rotated.envelope.recoveryWrapped);
+  assert.notEqual(rotated.envelope.recoveryWrapped.salt, oldEnvelope.recoveryWrapped?.salt);
+  assert.notEqual(rotated.newRecoveryKey, oldRecoveryKey);
+  assert.match(rotated.newRecoveryKey, /^[A-HJ-NP-Z2-9]{4}(-[A-HJ-NP-Z2-9]{4}){5}$/);
+
+  // Garante zero texto claro no novo envelope
+  const serialized = JSON.stringify(rotated.envelope);
+  assert.equal(serialized.includes('Nubank'), false);
+  assert.equal(serialized.includes(newPassword), false);
+  assert.equal(serialized.includes(oldPassword), false);
+
+  // Senha antiga e Recovery Key antiga são invalidadas no novo envelope
+  await assert.rejects(() => decryptVaultPayload(rotated.envelope, oldPassword), /falha ao decifrar/i);
+  await assert.rejects(() => unlockVaultWithSession(rotated.envelope, oldPassword), /falha ao decifrar/i);
+  await assert.rejects(
+    () => decryptVaultPayload(rotated.envelope, oldRecoveryKey),
+    /falha ao decifrar/i
+  );
+  await assert.rejects(
+    () => unlockVaultWithSession(rotated.envelope, oldRecoveryKey),
+    /falha ao decifrar/i
+  );
+
+  // Novo envelope desbloqueia com a nova Senha Mestra e com a nova Recovery Key
+  const byNewPwd = await unlockVaultWithSession<AppState>(rotated.envelope, newPassword);
+  assert.equal(byNewPwd.unlockedViaRecovery, false);
+  assert.deepEqual(byNewPwd.data, state);
+
+  const byNewRec = await unlockVaultWithSession<AppState>(
+    rotated.envelope,
+    normalizeRecoveryKey(rotated.newRecoveryKey).toLowerCase()
+  );
+  assert.equal(byNewRec.unlockedViaRecovery, true);
+  assert.deepEqual(byNewRec.data, state);
+
+  // Também suporta rotação autenticando com a Recovery Key vigente
+  const thirdPassword = 'TerceiraSenha#2028!';
+  const rotatedViaRec = await rotateVaultMasterPassword<AppState>(
+    rotated.envelope,
+    rotated.newRecoveryKey,
+    thirdPassword
+  );
+  await assert.rejects(
+    () => decryptVaultPayload(rotatedViaRec.envelope, newPassword),
+    /falha ao decifrar/i
+  );
+  await assert.rejects(
+    () => decryptVaultPayload(rotatedViaRec.envelope, rotated.newRecoveryKey),
+    /falha ao decifrar/i
+  );
+  assert.deepEqual(
+    await decryptVaultPayload<AppState>(rotatedViaRec.envelope, thirdPassword),
+    state
+  );
+  assert.deepEqual(
+    await decryptVaultPayload<AppState>(rotatedViaRec.envelope, rotatedViaRec.newRecoveryKey),
+    state
+  );
 });

@@ -4,6 +4,7 @@ import { AppState, fmtBRL, formatMonthYear } from '../utils/storage';
 import {
   ExpenseItem,
   parseQuickExpenseCommand,
+  RecurringExpenseTemplate,
   rubberbandOffset,
   shouldDismissSheetOnRelease,
 } from '../utils/financeMath';
@@ -30,7 +31,46 @@ import {
   Eye,
   EyeOff,
   AlertTriangle,
+  Pencil,
+  CornerDownLeft,
+  Clock,
+  RefreshCw,
+  Database,
+  Sun,
+  Moon,
+  Plus,
+  ArrowRightLeft,
+  Landmark,
+  PiggyBank,
+  LayoutDashboard,
+  Receipt,
+  CreditCard,
+  Wallet,
+  Scale,
+  ClipboardCheck,
 } from 'lucide-react';
+
+const MODAL_EXPENSE_CATEGORIES: ExpenseItem['categoria'][] = [
+  'Alimentação',
+  'Transporte',
+  'Moradia',
+  'Conectividade',
+  'Utilidades',
+  'Saúde',
+  'Educação',
+  'Impostos',
+  'Lazer',
+  'Assinaturas',
+  'Imprevisto',
+  'Outros',
+];
+
+const normalizeSearchText = (value: string): string =>
+  value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
 
 export type ActiveModalType =
   | null
@@ -64,9 +104,16 @@ interface AppModalsProps {
   selectedId: string | null;
   state: AppState;
   privacyMode: boolean;
+  darkMode: boolean;
+  daysSinceBackup: number | null;
+  hasRegisteredData: boolean;
   quickEditConfig?: QuickEditConfig | null;
   onClose: () => void;
+  onOpenModal: (modal: Exclude<ActiveModalType, null>) => void;
   onNavigate: (tab: string) => void;
+  onTogglePrivacyMode: () => void;
+  onToggleDarkMode: () => void;
+  onLoadDemoData: () => void;
   onSaveBank: (nome: string, tipo: any, saldo: number, rendeJuros: boolean, pctCDI: number) => void;
   onExecutePix: (origId: string, destId: string, valor: number) => void;
   onSaveGoal: (
@@ -103,11 +150,12 @@ interface AppModalsProps {
     diaVencimento: number,
     categoria: ExpenseItem['categoria']
   ) => void;
+  onUpdateTemplateItem: (item: RecurringExpenseTemplate) => void;
   onToggleTemplateItem: (id: string) => void;
   onDeleteTemplateItem: (id: string) => void;
   onConfirmReceiveSalary: (bankId: string, autoAportarCaixinhas: boolean) => void;
   onSavePaydayConfig: (tipo: 'quintoDiaUtil' | 'diaFixo' | 'dataExata', diaFixo: number, dataExata: string | null) => void;
-  onExportJSON: () => void;
+  onExportJSON: () => void | Promise<void>;
   onExportCSV: () => void;
   onImportJSON: (file: File) => void;
   onResetFactory: () => void;
@@ -115,10 +163,11 @@ interface AppModalsProps {
   vaultConfig: VaultSessionConfig;
   lastGeneratedRecoveryKey: string | null;
   onActivateVault: (password: string, recoveryKey: string, autoLockMin: number) => Promise<void>;
+  onRotateVaultPassword: (currentSecret: string, newPassword: string) => Promise<{ ok: boolean; error?: string }>;
   onDeactivateVault: (currentPassword: string) => Promise<boolean>;
   onUpdateVaultAutoLock: (autoLockMin: number) => void;
   onLockVaultNow: () => void | Promise<void>;
-  onExportVault: () => void;
+  onExportVault: () => void | Promise<void>;
   onImportVault: (file: File, secret: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
@@ -127,9 +176,16 @@ export const AppModals: React.FC<AppModalsProps> = ({
   selectedId,
   state,
   privacyMode,
+  darkMode,
+  daysSinceBackup,
+  hasRegisteredData,
   quickEditConfig,
   onClose,
+  onOpenModal,
   onNavigate,
+  onTogglePrivacyMode,
+  onToggleDarkMode,
+  onLoadDemoData,
   onSaveBank,
   onExecutePix,
   onSaveGoal,
@@ -139,6 +195,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
   onSaveNewExpense,
   onConfirmPayExpense,
   onAddTemplateItem,
+  onUpdateTemplateItem,
   onToggleTemplateItem,
   onDeleteTemplateItem,
   onConfirmReceiveSalary,
@@ -151,6 +208,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
   vaultConfig,
   lastGeneratedRecoveryKey,
   onActivateVault,
+  onRotateVaultPassword,
   onDeactivateVault,
   onUpdateVaultAutoLock,
   onLockVaultNow,
@@ -168,6 +226,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
   const [pixOrig, setPixOrig] = useState('');
   const [pixDest, setPixDest] = useState('');
   const [pixVal, setPixVal] = useState('');
+  const [pixError, setPixError] = useState<string | null>(null);
 
   // Goal state
   const [goalNome, setGoalNome] = useState('');
@@ -213,6 +272,18 @@ export const AppModals: React.FC<AppModalsProps> = ({
   const [vaultBusy, setVaultBusy] = useState(false);
   const [vaultError, setVaultError] = useState<string | null>(null);
   const [vaultCopiedKey, setVaultCopiedKey] = useState(false);
+  const [vaultClipboardNotice, setVaultClipboardNotice] = useState<string | null>(null);
+  const clipboardClearTimerRef = useRef<number | null>(null);
+
+  // Vault Master Password Rotation state
+  const [rotateCurrentSecret, setRotateCurrentSecret] = useState('');
+  const [rotateNewPwd, setRotateNewPwd] = useState('');
+  const [rotateConfirmPwd, setRotateConfirmPwd] = useState('');
+  const [rotateShowPwd, setRotateShowPwd] = useState(false);
+  const [rotateBusy, setRotateBusy] = useState(false);
+  const [rotateError, setRotateError] = useState<string | null>(null);
+  const [rotateSuccessMsg, setRotateSuccessMsg] = useState<string | null>(null);
+
   const [confirmDeactivateVault, setConfirmDeactivateVault] = useState(false);
   const [deactivateVaultSecret, setDeactivateVaultSecret] = useState('');
   const [deactivateVaultError, setDeactivateVaultError] = useState<string | null>(null);
@@ -225,11 +296,17 @@ export const AppModals: React.FC<AppModalsProps> = ({
   // Pay Expense state
   const [payBankId, setPayBankId] = useState('');
 
-  // Template new item
+  // Template new & edit item state
   const [tplDesc, setTplDesc] = useState('');
   const [tplVal, setTplVal] = useState('');
   const [tplDia, setTplDia] = useState('10');
   const [tplCat, setTplCat] = useState<ExpenseItem['categoria']>('Moradia');
+  const [editingTplId, setEditingTplId] = useState<string | null>(null);
+  const [editTplDesc, setEditTplDesc] = useState('');
+  const [editTplVal, setEditTplVal] = useState('');
+  const [editTplDia, setEditTplDia] = useState('10');
+  const [editTplCat, setEditTplCat] = useState<ExpenseItem['categoria']>('Moradia');
+  const [editTplError, setEditTplError] = useState<string | null>(null);
 
   // Salary Sorter state
   const [salBankId, setSalBankId] = useState('');
@@ -242,11 +319,21 @@ export const AppModals: React.FC<AppModalsProps> = ({
 
   // Command Palette state
   const [cmdkQuery, setCmdkQuery] = useState('');
+  const [cmdkSelectedIndex, setCmdkSelectedIndex] = useState(0);
+  const cmdkOptionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [quickEditVal, setQuickEditVal] = useState('');
   const [confirmReset, setConfirmReset] = useState(false);
   const shouldReduceMotion = useReducedMotion();
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const sheetRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (clipboardClearTimerRef.current !== null) {
+        window.clearTimeout(clipboardClearTimerRef.current);
+      }
+    };
+  }, []);
 
   // Apple WWDC 2018 1:1 Sheet Drag & Velocity Handoff state
   const [dragOffsetY, setDragOffsetY] = useState(0);
@@ -337,6 +424,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
 
     if (activeModal === 'pixTransfer') {
       setPixVal('');
+      setPixError(null);
     }
 
     if (activeModal === 'newGoal') {
@@ -366,6 +454,11 @@ export const AppModals: React.FC<AppModalsProps> = ({
       setExpParcelas('1');
     }
 
+    if (activeModal === 'templateModal') {
+      setEditingTplId(null);
+      setEditTplError(null);
+    }
+
     if (activeModal === 'vaultSecurity') {
       setVaultPwd('');
       setVaultPwdConfirm('');
@@ -373,6 +466,13 @@ export const AppModals: React.FC<AppModalsProps> = ({
       setVaultAutoLock(vaultConfig.autoLockMin);
       setVaultError(null);
       setVaultCopiedKey(false);
+      setVaultClipboardNotice(null);
+      setRotateCurrentSecret('');
+      setRotateNewPwd('');
+      setRotateConfirmPwd('');
+      setRotateShowPwd(false);
+      setRotateError(null);
+      setRotateSuccessMsg(null);
       setConfirmDeactivateVault(false);
       setDeactivateVaultSecret('');
       setDeactivateVaultError(null);
@@ -402,6 +502,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
 
     if (activeModal === 'cmdk') {
       setCmdkQuery('');
+      setCmdkSelectedIndex(0);
     }
 
     if (activeModal === 'quickEditValue') {
@@ -414,6 +515,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
     state.bancos,
     state.caixinhas,
     state.configPagamento,
+    vaultConfig.autoLockMin,
     cxFire,
   ]);
 
@@ -421,6 +523,12 @@ export const AppModals: React.FC<AppModalsProps> = ({
     if (activeModal !== 'vaultSecurity') {
       setVaultPwd('');
       setVaultPwdConfirm('');
+      setRotateCurrentSecret('');
+      setRotateNewPwd('');
+      setRotateConfirmPwd('');
+      setRotateShowPwd(false);
+      setRotateError(null);
+      setRotateSuccessMsg(null);
       setImportVaultSecret('');
       setDeactivateVaultSecret('');
       setDeactivateVaultError(null);
@@ -429,10 +537,293 @@ export const AppModals: React.FC<AppModalsProps> = ({
     }
   }, [activeModal]);
 
+  const handleCopyRecoveryKey = async (keyToCopy: string) => {
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+        throw new Error('Clipboard API indisponível');
+      }
+      await navigator.clipboard.writeText(keyToCopy);
+      setVaultCopiedKey(true);
+      setVaultClipboardNotice('Copiada! Por segurança, a área de transferência será limpa em 30s.');
+      if (clipboardClearTimerRef.current !== null) {
+        window.clearTimeout(clipboardClearTimerRef.current);
+      }
+      clipboardClearTimerRef.current = window.setTimeout(async () => {
+        clipboardClearTimerRef.current = null;
+        try {
+          if (typeof navigator.clipboard?.readText === 'function') {
+            try {
+              const currentClip = await navigator.clipboard.readText();
+              if (currentClip && currentClip.trim() !== keyToCopy.trim()) {
+                setVaultCopiedKey(false);
+                setVaultClipboardNotice(null);
+                return;
+              }
+            } catch {
+              // Permissão de leitura não concedida ou aba em segundo plano: prossegue com limpeza defensiva
+            }
+          }
+          await navigator.clipboard?.writeText('');
+        } catch {
+          // Ignora restrição do navegador caso a janela não esteja em foco após 30s
+        } finally {
+          setVaultCopiedKey(false);
+          setVaultClipboardNotice(null);
+        }
+      }, 30_000);
+    } catch {
+      setVaultClipboardNotice(
+        'Não foi possível copiar automaticamente. O navegador restringiu o acesso à área de transferência. Selecione e copie a chave manualmente.'
+      );
+    }
+  };
+
+  const backupStatusText =
+    daysSinceBackup === null
+      ? 'Último backup: ainda não realizado'
+      : daysSinceBackup === 0
+        ? 'Último backup: hoje'
+        : daysSinceBackup === 1
+          ? 'Último backup: há 1 dia'
+          : `Último backup: há ${daysSinceBackup} dias`;
+
   const targetCaixinha = state.caixinhas.find((c) => c.id === selectedId);
   const despesasMes = state.despesasPorMes[state.competenciaAtual] || [];
   const targetExpense = despesasMes.find((d) => d.id === selectedId);
   const parsedQuick = parseQuickExpenseCommand(cmdkQuery);
+
+  const quickActionsCatalog = [
+    {
+      id: 'nav-overview',
+      label: 'Ir para Visão Geral (Cockpit)',
+      group: 'Navegação',
+      keywords: 'visao geral inicio painel cockpit diaria segura orcamento 50 30 20',
+      icon: LayoutDashboard,
+      execute: () => {
+        onNavigate('visao-geral');
+        onClose();
+      },
+    },
+    {
+      id: 'nav-banks',
+      label: 'Ir para Bancos & Saldos',
+      group: 'Navegação',
+      keywords: 'bancos contas saldo liquidez cdi custodia corrente',
+      icon: Landmark,
+      execute: () => {
+        onNavigate('bancos');
+        onClose();
+      },
+    },
+    {
+      id: 'nav-goals',
+      label: 'Ir para Caixinhas & Aposentadoria FIRE',
+      group: 'Navegação',
+      keywords: 'caixinhas metas reserva emergencia aposentadoria fire independencia',
+      icon: PiggyBank,
+      execute: () => {
+        onNavigate('caixinhas');
+        onClose();
+      },
+    },
+    {
+      id: 'nav-payroll',
+      label: 'Ir para Contracheque & INSS/IRRF',
+      group: 'Navegação',
+      keywords: 'contracheque salario folha clt inss irrf horas de vida holerite',
+      icon: Wallet,
+      execute: () => {
+        onNavigate('contracheque');
+        onClose();
+      },
+    },
+    {
+      id: 'nav-cards',
+      label: 'Ir para Cartões & Simulador CDI',
+      group: 'Navegação',
+      keywords: 'cartoes credito fatura limite corte vencimento simulador parcelado vista',
+      icon: CreditCard,
+      execute: () => {
+        onNavigate('cartoes');
+        onClose();
+      },
+    },
+    {
+      id: 'nav-expenses',
+      label: 'Ir para Despesas, Envelopes & Dívidas',
+      group: 'Navegação',
+      keywords: 'despesas contas pagar envelopes receitas extras dividas avalanche bola de neve',
+      icon: Receipt,
+      execute: () => {
+        onNavigate('despesas');
+        onClose();
+      },
+    },
+    {
+      id: 'nav-taxes',
+      label: 'Ir para Impostos & Reforma Tributária (RTC)',
+      group: 'Navegação',
+      keywords: 'impostos tributos reforma tributaria rtc cbs ibs simples nacional nfse xml',
+      icon: Scale,
+      execute: () => {
+        onNavigate('impostos');
+        onClose();
+      },
+    },
+    {
+      id: 'nav-audit',
+      label: 'Ir para Diagnóstico & Auditoria do App',
+      group: 'Navegação',
+      keywords: 'diagnostico auditoria integridade verificacao sistema',
+      icon: ClipboardCheck,
+      execute: () => {
+        onNavigate('diagnostico');
+        onClose();
+      },
+    },
+    {
+      id: 'act-new-expense',
+      label: 'Registrar Nova Despesa',
+      group: 'Cadastros Rápidos',
+      keywords: 'nova despesa novo gasto lancar conta boleto parcelamento',
+      icon: Plus,
+      execute: () => {
+        onOpenModal('newExpense');
+      },
+    },
+    {
+      id: 'act-pix',
+      label: 'Executar Nova Transferência Pix',
+      group: 'Cadastros Rápidos',
+      keywords: 'nova transferencia pix entre contas movimentar saldo',
+      icon: ArrowRightLeft,
+      execute: () => {
+        onOpenModal('pixTransfer');
+      },
+    },
+    {
+      id: 'act-new-bank',
+      label: 'Cadastrar Novo Banco ou Conta',
+      group: 'Cadastros Rápidos',
+      keywords: 'novo banco nova conta bancaria carteira corretora',
+      icon: Landmark,
+      execute: () => {
+        onOpenModal('newBank');
+      },
+    },
+    {
+      id: 'act-new-goal',
+      label: 'Criar Nova Caixinha ou Meta',
+      group: 'Cadastros Rápidos',
+      keywords: 'nova caixinha nova meta objetivo reserva',
+      icon: PiggyBank,
+      execute: () => {
+        onOpenModal('newGoal');
+      },
+    },
+    {
+      id: 'act-privacy',
+      label: privacyMode ? 'Revelar Saldos (Desativar Modo Privacidade)' : 'Ocultar Saldos (Ativar Modo Privacidade)',
+      group: 'Preferências & Segurança',
+      keywords: 'alternar modo privacidade ocultar revelar saldos esconder blur',
+      icon: privacyMode ? Eye : EyeOff,
+      execute: () => {
+        onTogglePrivacyMode();
+        onClose();
+      },
+    },
+    {
+      id: 'act-theme',
+      label: darkMode ? 'Ativar Tema Claro' : 'Ativar Tema Escuro',
+      group: 'Preferências & Segurança',
+      keywords: 'alternar tema claro escuro dark light aparencia modo noturno',
+      icon: darkMode ? Sun : Moon,
+      execute: () => {
+        onToggleDarkMode();
+        onClose();
+      },
+    },
+    {
+      id: 'act-vault',
+      label: 'Abrir Cofre Zero-Knowledge (AES-256-GCM)',
+      group: 'Preferências & Segurança',
+      keywords: 'abrir cofre zero knowledge criptografia senha mestra seguranca trancar',
+      icon: Shield,
+      execute: () => {
+        onOpenModal('vaultSecurity');
+      },
+    },
+    {
+      id: 'act-export-json',
+      label: 'Exportar Backup Assinado SHA-256 (JSON v4.1)',
+      group: 'Dados & Demonstração',
+      keywords: 'exportar backup assinado sha-256 sha256 json baixar salvar copia',
+      icon: Download,
+      execute: () => {
+        void onExportJSON();
+        onClose();
+      },
+    },
+    {
+      id: 'act-demo',
+      label: 'Carregar Cenário Demonstrativo',
+      group: 'Dados & Demonstração',
+      keywords: 'carregar cenario demo demonstrativo exemplo dados teste',
+      icon: Database,
+      execute: () => {
+        onLoadDemoData();
+        onClose();
+      },
+    },
+  ];
+
+  const normalizedCmdkQuery = normalizeSearchText(cmdkQuery);
+  const filteredQuickActions = quickActionsCatalog.filter((item) => {
+    if (!normalizedCmdkQuery) return true;
+    const haystack = normalizeSearchText(`${item.label} ${item.group} ${item.keywords}`);
+    return haystack.includes(normalizedCmdkQuery);
+  });
+
+  const unifiedCmdkOptions = [
+    ...(parsedQuick
+      ? [
+          {
+            id: 'quick-expense-nlp',
+            isQuickExpense: true as const,
+            label: `Registrar Gasto: ${parsedQuick.descricao}`,
+            sublabel: `Categoria: ${parsedQuick.categoria} · Forma: ${parsedQuick.formaPagamento}`,
+            amount: parsedQuick.valor,
+            icon: Sparkles,
+            execute: () => {
+              const isCreditCard = parsedQuick.formaPagamento === 'Cartão de Crédito';
+              onSaveNewExpense(
+                parsedQuick.descricao,
+                parsedQuick.valor,
+                new Date().getDate(),
+                parsedQuick.categoria,
+                !isCreditCard,
+                isCreditCard ? null : state.bancos[0]?.id || null
+              );
+              onClose();
+            },
+          },
+        ]
+      : []),
+    ...filteredQuickActions.map((act) => ({
+      id: act.id,
+      isQuickExpense: false as const,
+      label: act.label,
+      sublabel: act.group,
+      amount: null as number | null,
+      icon: act.icon,
+      execute: act.execute,
+    })),
+  ];
+
+  const safeCmdkIndex =
+    unifiedCmdkOptions.length > 0
+      ? Math.min(cmdkSelectedIndex, unifiedCmdkOptions.length - 1)
+      : -1;
 
   const handleSheetPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -540,7 +931,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 aria-label="Fechar janela"
                 className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
               >
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -558,125 +949,209 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 required
                 value={quickEditVal}
                 onChange={(e) => setQuickEditVal(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-base font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 privacy-val"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-base font-mono font-bold text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-emerald-500 privacy-val tabular-nums"
               />
             </div>
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 type="button"
                 onClick={onClose}
-                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer inline-flex items-center justify-center"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer inline-flex items-center justify-center"
               >
-                Cancelar
+                Cancelar Edição
               </button>
               <button
                 type="submit"
                 className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer inline-flex items-center justify-center gap-1.5"
               >
-                <CheckCircle2 className="w-3.5 h-3.5" />
+                <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
                 <span>Salvar Alteração</span>
               </button>
             </div>
           </form>
         )}
 
-        {/* COMMAND PALETTE (CTRL+K) */}
+        {/* COMMAND PALETTE SPOTLIGHT REAL (CTRL+K) */}
         {activeModal === 'cmdk' && (
-          <div className="space-y-4">
+          <div className="space-y-3">
             <h3 id="fintrack-modal-title" className="sr-only">
-              Busca e Lançamento Rápido
+              Central de Comandos e Lançamento Rápido
             </h3>
-            <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-3">
-              <Search className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
+            <div className="flex items-center gap-2 border-b border-slate-200 dark:border-slate-800 pb-2.5">
+              <Search className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" aria-hidden="true" />
               <input
                 id="cmdk-search-input"
                 type="text"
+                role="combobox"
+                aria-expanded="true"
+                aria-controls="cmdk-options-listbox"
+                aria-activedescendant={
+                  safeCmdkIndex >= 0 ? `cmdk-opt-${unifiedCmdkOptions[safeCmdkIndex]?.id}` : undefined
+                }
                 autoFocus
-                aria-label="Digite um gasto para lançamento rápido ou busque uma aba"
+                aria-label="Digite um gasto para lançamento rápido ou filtre uma ação do sistema"
                 value={cmdkQuery}
-                onChange={(e) => setCmdkQuery(e.target.value)}
+                onChange={(e) => {
+                  setCmdkQuery(e.target.value);
+                  setCmdkSelectedIndex(0);
+                }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter' && parsedQuick) {
+                  if (e.key === 'ArrowDown') {
                     e.preventDefault();
-                    const isCreditCard = parsedQuick.formaPagamento === 'Cartão de Crédito';
-                    onSaveNewExpense(
-                      parsedQuick.descricao,
-                      parsedQuick.valor,
-                      new Date().getDate(),
-                      parsedQuick.categoria,
-                      !isCreditCard,
-                      isCreditCard ? null : state.bancos[0]?.id || null
-                    );
-                    onClose();
+                    if (unifiedCmdkOptions.length === 0) return;
+                    const nextIdx = (safeCmdkIndex + 1) % unifiedCmdkOptions.length;
+                    setCmdkSelectedIndex(nextIdx);
+                    cmdkOptionRefs.current[nextIdx]?.scrollIntoView({ block: 'nearest' });
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (unifiedCmdkOptions.length === 0) return;
+                    const prevIdx =
+                      (safeCmdkIndex - 1 + unifiedCmdkOptions.length) % unifiedCmdkOptions.length;
+                    setCmdkSelectedIndex(prevIdx);
+                    cmdkOptionRefs.current[prevIdx]?.scrollIntoView({ block: 'nearest' });
+                  } else if (e.key === 'Enter') {
+                    if (safeCmdkIndex >= 0 && unifiedCmdkOptions[safeCmdkIndex]) {
+                      e.preventDefault();
+                      unifiedCmdkOptions[safeCmdkIndex].execute();
+                    }
                   }
                 }}
-                placeholder="Digite um gasto (ex: 'Almoço 38,50 pix') ou busque uma aba..."
-                className="w-full bg-transparent text-sm text-slate-900 dark:text-white rounded-md px-1 py-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+                placeholder="Ex.: 'Almoço 38,50 pix', 'Cofre', 'Backup', 'Impostos'..."
+                className="w-full min-h-[44px] bg-transparent text-sm text-slate-900 dark:text-white rounded-md px-1.5 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
               />
               <button
                 type="button"
                 onClick={onClose}
-                aria-label="Fechar busca rápida"
-                className="text-xs text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 px-2 py-0.5 border border-slate-200 dark:border-slate-700 rounded cursor-pointer"
+                aria-label="Fechar central de comandos"
+                className="min-h-[44px] px-3 rounded-lg text-xs font-semibold text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 cursor-pointer shrink-0 inline-flex items-center justify-center"
               >
-                ESC
+                Fechar
               </button>
             </div>
 
-            {parsedQuick && (
-              <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-xl p-3.5 flex items-center justify-between gap-3">
-                <div className="text-xs">
-                  <div className="font-bold text-emerald-900 dark:text-emerald-300 flex items-center gap-1.5">
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Lançamento Rápido Detectado: {parsedQuick.descricao}</span>
-                  </div>
-                  <div className="text-emerald-700 dark:text-emerald-400 mt-0.5">
-                    Categoria: {parsedQuick.categoria} · Forma: {parsedQuick.formaPagamento}
-                  </div>
+            {unifiedCmdkOptions.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/50 p-5 text-center space-y-3">
+                <div className="w-10 h-10 rounded-xl bg-slate-200/70 dark:bg-slate-800 text-slate-600 dark:text-slate-300 mx-auto flex items-center justify-center">
+                  <Search className="w-4 h-4" aria-hidden="true" />
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const isCreditCard = parsedQuick.formaPagamento === 'Cartão de Crédito';
-                    onSaveNewExpense(
-                      parsedQuick.descricao,
-                      parsedQuick.valor,
-                      new Date().getDate(),
-                      parsedQuick.categoria,
-                      !isCreditCard,
-                      isCreditCard ? null : state.bancos[0]?.id || null
+                <div className="space-y-1">
+                  <p className="text-xs font-bold text-slate-900 dark:text-white">
+                    Nenhum comando ou lançamento encontrado
+                  </p>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    Digite uma descrição com valor (ex.: &ldquo;Mercado 120,00 pix&rdquo;) para lançar na hora ou pesquise ações como Cofre, Backup ou Transferência.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCmdkQuery('');
+                      setCmdkSelectedIndex(0);
+                      document.getElementById('cmdk-search-input')?.focus();
+                    }}
+                    className="min-h-[44px] px-3.5 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  >
+                    Limpar Busca
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onOpenModal('newExpense')}
+                    className="min-h-[44px] px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                    <span>Registrar Gasto Manual</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div
+                id="cmdk-options-listbox"
+                role="listbox"
+                aria-label="Ações rápidas e lançamentos sugeridos"
+                className="max-h-80 overflow-y-auto space-y-1 pr-0.5"
+              >
+                {unifiedCmdkOptions.map((opt, idx) => {
+                  const IconComp = opt.icon;
+                  const isSelected = idx === safeCmdkIndex;
+                  if (opt.isQuickExpense) {
+                    return (
+                      <button
+                        key={opt.id}
+                        id={`cmdk-opt-${opt.id}`}
+                        ref={(el) => {
+                          cmdkOptionRefs.current[idx] = el;
+                        }}
+                        type="button"
+                        role="option"
+                        aria-selected={isSelected}
+                        onMouseEnter={() => setCmdkSelectedIndex(idx)}
+                        onClick={opt.execute}
+                        className={`w-full min-h-[48px] text-left rounded-xl p-3 flex items-center justify-between gap-3 transition-colors cursor-pointer border ${
+                          isSelected
+                            ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-400 dark:border-emerald-600'
+                            : 'bg-emerald-50/50 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800/80 hover:bg-emerald-50 dark:hover:bg-emerald-950/50'
+                        }`}
+                      >
+                        <div className="text-xs min-w-0">
+                          <div className="font-bold text-emerald-900 dark:text-emerald-200 flex items-center gap-1.5">
+                            <Sparkles className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                            <span className="truncate">{opt.label}</span>
+                          </div>
+                          <div className="text-emerald-700 dark:text-emerald-400 mt-0.5 truncate">
+                            {opt.sublabel}
+                          </div>
+                        </div>
+                        <span className="min-h-[44px] px-3 py-1.5 rounded-lg bg-emerald-700 text-white font-mono text-xs font-bold shrink-0 inline-flex items-center gap-1.5 tabular-nums">
+                          <span>Lançar</span>
+                          <span className="privacy-val">{fmtBRL(opt.amount ?? 0)}</span>
+                          <CornerDownLeft className="w-3.5 h-3.5" aria-hidden="true" />
+                        </span>
+                      </button>
                     );
-                    onClose();
-                  }}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-mono text-xs font-bold shrink-0 cursor-pointer"
-                >
-                  Lançar <span className="privacy-val">{fmtBRL(parsedQuick.valor)}</span> ↵
-                </button>
+                  }
+
+                  return (
+                    <button
+                      key={opt.id}
+                      id={`cmdk-opt-${opt.id}`}
+                      ref={(el) => {
+                        cmdkOptionRefs.current[idx] = el;
+                      }}
+                      type="button"
+                      role="option"
+                      aria-selected={isSelected}
+                      onMouseEnter={() => setCmdkSelectedIndex(idx)}
+                      onClick={opt.execute}
+                      className={`w-full min-h-[44px] text-left px-3 py-2 rounded-lg text-xs flex items-center justify-between gap-3 transition-colors cursor-pointer ${
+                        isSelected
+                          ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-900 dark:text-emerald-200 font-semibold'
+                          : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 font-medium'
+                      }`}
+                    >
+                      <span className="flex items-center gap-2.5 min-w-0">
+                        <IconComp
+                          className={`w-4 h-4 shrink-0 ${
+                            isSelected
+                              ? 'text-emerald-700 dark:text-emerald-400'
+                              : 'text-slate-400 dark:text-slate-500'
+                          }`}
+                          aria-hidden="true"
+                        />
+                        <span className="truncate">{opt.label}</span>
+                      </span>
+                      <span className="text-[11px] text-slate-400 dark:text-slate-500 shrink-0 hidden sm:inline">
+                        {opt.sublabel}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             )}
 
-            <div className="space-y-1">
-              <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 px-2">Navegação & Ações Rápidas</span>
-              {[
-                { label: 'Ir para Visão Geral (Cockpit)', action: () => { onNavigate('visao-geral'); onClose(); } },
-                { label: 'Ir para Diagnóstico & Auditoria do App', action: () => { onNavigate('diagnostico'); onClose(); } },
-                { label: 'Ir para Bancos & Saldos', action: () => { onNavigate('bancos'); onClose(); } },
-                { label: 'Ir para Caixinhas & Aposentadoria FIRE', action: () => { onNavigate('caixinhas'); onClose(); } },
-                { label: 'Ir para Contracheque & INSS/IRRF', action: () => { onNavigate('contracheque'); onClose(); } },
-                { label: 'Ir para Cartões & Simulador', action: () => { onNavigate('cartoes'); onClose(); } },
-                { label: 'Ir para Despesas & Envelopes', action: () => { onNavigate('despesas'); onClose(); } },
-              ]
-                .filter((item) => !cmdkQuery || item.label.toLowerCase().includes(cmdkQuery.toLowerCase()))
-                .map((item, i) => (
-                  <button
-                    key={i}
-                    type="button"
-                    onClick={item.action}
-                    className="w-full text-left px-3 py-2 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors block cursor-pointer"
-                  >
-                    {item.label}
-                  </button>
-                ))}
+            <div className="flex items-center justify-between pt-1 border-t border-slate-100 dark:border-slate-800/80 text-[11px] text-slate-500 dark:text-slate-400">
+              <span>Use ↑ ↓ para navegar e Enter para executar</span>
+              <span className="font-mono">Ctrl + K</span>
             </div>
           </div>
         )}
@@ -704,7 +1179,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
             <div className="flex items-center justify-between">
               <h3 id="fintrack-modal-title" className="text-base font-bold text-slate-900 dark:text-white">Cadastrar Conta Bancária</h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
@@ -718,7 +1193,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 value={bankNome}
                 onChange={(e) => setBankNome(e.target.value)}
                 placeholder="Ex: Nubank, Itaú, Inter, Carteira"
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -730,7 +1205,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   id="bank-tipo"
                   value={bankTipo}
                   onChange={(e) => setBankTipo(e.target.value as any)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
                 >
                   <option value="Conta Digital">Conta Digital</option>
                   <option value="Conta Corrente">Conta Corrente</option>
@@ -750,12 +1225,12 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   value={bankSaldo}
                   onChange={(e) => setBankSaldo(e.target.value)}
                   placeholder="0.00"
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
             </div>
             <div className="bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 space-y-3">
-              <label htmlFor="bank-rende" className="flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
+              <label htmlFor="bank-rende" className="min-h-[44px] flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
                 <input
                   id="bank-rende"
                   type="checkbox"
@@ -773,7 +1248,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                     min={0}
                     value={bankPctCdi}
                     onChange={(e) => setBankPctCdi(e.target.value)}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white"
+                    className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white tabular-nums"
                   />
                 </div>
               )}
@@ -782,13 +1257,13 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Cadastro
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Salvar Conta
               </button>
@@ -801,7 +1276,27 @@ export const AppModals: React.FC<AppModalsProps> = ({
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              onExecutePix(pixOrig, pixDest, parseFloat(pixVal) || 0);
+              setPixError(null);
+              const val = parseFloat(pixVal) || 0;
+              if (state.bancos.length < 2) {
+                setPixError(
+                  'Não foi possível concluir a transferência Pix. É necessário ter pelo menos duas contas cadastradas. Cadastre outra conta na aba Bancos & Saldos antes de transferir.'
+                );
+                return;
+              }
+              if (!pixOrig || !pixDest || pixOrig === pixDest) {
+                setPixError(
+                  'Não foi possível concluir a transferência Pix. As contas de origem e destino selecionadas são idênticas. Escolha duas instituições diferentes para movimentar o saldo.'
+                );
+                return;
+              }
+              if (val <= 0) {
+                setPixError(
+                  'Não foi possível concluir a transferência Pix. O valor informado precisa ser maior que zero. Digite um valor positivo em reais.'
+                );
+                return;
+              }
+              onExecutePix(pixOrig, pixDest, val);
               setPixVal('');
               onClose();
             }}
@@ -810,7 +1305,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
             <div className="flex items-center justify-between">
               <h3 id="fintrack-modal-title" className="text-base font-bold text-slate-900 dark:text-white">Transferência Pix entre Contas</h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
@@ -820,8 +1315,11 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <select
                 id="pix-orig"
                 value={pixOrig}
-                onChange={(e) => setPixOrig(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                onChange={(e) => {
+                  setPixOrig(e.target.value);
+                  if (pixError) setPixError(null);
+                }}
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               >
                 {state.bancos.map((b) => (
                   <option key={b.id} value={b.id}>
@@ -837,8 +1335,11 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <select
                 id="pix-dest"
                 value={pixDest}
-                onChange={(e) => setPixDest(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                onChange={(e) => {
+                  setPixDest(e.target.value);
+                  if (pixError) setPixError(null);
+                }}
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               >
                 {state.bancos.map((b) => (
                   <option key={b.id} value={b.id}>
@@ -858,22 +1359,31 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 min="0.01"
                 required
                 value={pixVal}
-                onChange={(e) => setPixVal(e.target.value)}
+                onChange={(e) => {
+                  setPixVal(e.target.value);
+                  if (pixError) setPixError(null);
+                }}
                 placeholder="0.00"
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
               />
             </div>
+            {pixError && (
+              <p role="alert" className="rounded-xl border border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 px-3.5 py-2.5 text-xs font-semibold text-rose-700 dark:text-rose-300 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+                <span>{pixError}</span>
+              </p>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Transferência
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Confirmar Transferência
               </button>
@@ -906,7 +1416,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
             <div className="flex items-center justify-between">
               <h3 id="fintrack-modal-title" className="text-base font-bold text-slate-900 dark:text-white">Criar Nova Caixinha / Meta</h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
@@ -920,7 +1430,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 value={goalNome}
                 onChange={(e) => setGoalNome(e.target.value)}
                 placeholder="Ex: Reserva de Emergência, Troca de Notebook, IPVA"
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -932,7 +1442,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   id="goal-tipo"
                   value={goalTipo}
                   onChange={(e) => setGoalTipo(e.target.value as any)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
                 >
                   <option value="emergencia">Reserva de Emergência</option>
                   <option value="viagem">Consumo Programado / Viagem</option>
@@ -948,7 +1458,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   type="text"
                   value={goalInst}
                   onChange={(e) => setGoalInst(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
                 />
               </div>
             </div>
@@ -964,7 +1474,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   min={0}
                   value={goalSaldo}
                   onChange={(e) => setGoalSaldo(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
               <div>
@@ -978,7 +1488,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   min={0}
                   value={goalAporte}
                   onChange={(e) => setGoalAporte(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
               <div>
@@ -992,7 +1502,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   min={0}
                   value={goalMeta}
                   onChange={(e) => setGoalMeta(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
             </div>
@@ -1000,13 +1510,13 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Criação
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Salvar Meta
               </button>
@@ -1034,7 +1544,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 Configurar Plano de Independência Financeira (FIRE)
               </h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
@@ -1047,7 +1557,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 required
                 value={fireNome}
                 onChange={(e) => setFireNome(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1063,7 +1573,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   required
                   value={fireSaldo}
                   onChange={(e) => setFireSaldo(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
               <div>
@@ -1078,7 +1588,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   required
                   value={fireAporte}
                   onChange={(e) => setFireAporte(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
             </div>
@@ -1091,20 +1601,20 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 type="text"
                 value={fireInst}
                 onChange={(e) => setFireInst(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               />
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Ajuste
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Salvar Plano FIRE
               </button>
@@ -1134,12 +1644,12 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   : `Resgatar de ${targetCaixinha.nome}`}
               </h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
               <label htmlFor="goal-trans-val" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
-                Valor (R$) — Saldo na Caixinha: <span className="privacy-val">{fmtBRL(targetCaixinha.saldo)}</span>
+                Valor (R$) — Saldo na Caixinha: <span className="privacy-val tabular-nums">{fmtBRL(targetCaixinha.saldo)}</span>
               </label>
               <input
                 id="goal-trans-val"
@@ -1149,7 +1659,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 required
                 value={transVal}
                 onChange={(e) => setTransVal(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
               />
             </div>
             <div>
@@ -1162,7 +1672,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 id="goal-trans-bank"
                 value={transBankId}
                 onChange={(e) => setTransBankId(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               >
                 {state.bancos.map((b) => (
                   <option key={b.id} value={b.id}>
@@ -1175,15 +1685,15 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                {activeModal === 'aporteGoal' ? 'Cancelar Aporte' : 'Cancelar Resgate'}
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
-                Confirmar Operação
+                {activeModal === 'aporteGoal' ? 'Confirmar Aporte' : 'Confirmar Resgate'}
               </button>
             </div>
           </form>
@@ -1215,7 +1725,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
             <div className="flex items-center justify-between">
               <h3 id="fintrack-modal-title" className="text-base font-bold text-slate-900 dark:text-white">Cadastrar Cartão de Crédito</h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
@@ -1229,7 +1739,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 value={cardNome}
                 onChange={(e) => setCardNome(e.target.value)}
                 placeholder="Ex: Nubank Ultravioleta, Itaú Click"
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               />
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1244,7 +1754,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   max={31}
                   value={cardCorte}
                   onChange={(e) => setCardCorte(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
               <div>
@@ -1258,7 +1768,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   max={31}
                   value={cardVenc}
                   onChange={(e) => setCardVenc(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
             </div>
@@ -1274,7 +1784,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   min={0}
                   value={cardLimite}
                   onChange={(e) => setCardLimite(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
               <div>
@@ -1288,7 +1798,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   min={0}
                   value={cardFatura}
                   onChange={(e) => setCardFatura(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
               <div>
@@ -1299,7 +1809,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   id="card-beneficio"
                   value={cardBeneficio}
                   onChange={(e) => setCardBeneficio(e.target.value as any)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
                 >
                   <option value="Cashback">Cashback</option>
                   <option value="Milhas">Milhas / Pontos</option>
@@ -1311,13 +1821,13 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Cadastro
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Salvar Cartão
               </button>
@@ -1355,7 +1865,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 Registrar Gasto em {formatMonthYear(state.competenciaAtual)}
               </h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
@@ -1369,19 +1879,20 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 value={expDesc}
                 onChange={(e) => setExpDesc(e.target.value)}
                 placeholder="Ex: Supermercado, Farmácia, Almoço"
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               />
             </div>
 
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Atalhos rápidos de valor">
               {[25, 50, 100, 200, 350].map((v) => (
                 <button
                   key={v}
                   type="button"
                   onClick={() => setExpVal(String(v))}
-                  className="px-2.5 py-1 rounded-md bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-mono font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+                  aria-label={`Preencher valor com R$ ${v}`}
+                  className="min-h-[44px] px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-mono font-semibold text-slate-700 dark:text-slate-300 cursor-pointer tabular-nums"
                 >
-                  R$ {v}
+                  Usar R$ {v}
                 </button>
               ))}
             </div>
@@ -1400,7 +1911,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   value={expVal}
                   onChange={(e) => setExpVal(e.target.value)}
                   placeholder="0.00"
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
               <div>
@@ -1414,7 +1925,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   max={31}
                   value={expDia}
                   onChange={(e) => setExpDia(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
               <div>
@@ -1425,11 +1936,12 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   id="exp-cat"
                   value={expCat}
                   onChange={(e) => setExpCat(e.target.value as any)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
                 >
                   <option value="Alimentação">Alimentação (50%)</option>
                   <option value="Transporte">Transporte (50%)</option>
                   <option value="Moradia">Moradia (50%)</option>
+                  <option value="Conectividade">Conectividade (50%)</option>
                   <option value="Utilidades">Utilidades (50%)</option>
                   <option value="Saúde">Saúde (50%)</option>
                   <option value="Educação">Educação (50%)</option>
@@ -1454,7 +1966,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   max={48}
                   value={expParcelas}
                   onChange={(e) => setExpParcelas(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
               {(() => {
@@ -1463,14 +1975,14 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 if (nParc <= 1 || totalVal <= 0) return null;
                 return (
                   <p className="text-xs text-emerald-700 dark:text-emerald-400 font-medium pb-2">
-                    {nParc}x de <span className="font-mono font-bold privacy-val">{fmtBRL(totalVal / nParc)}</span>/mês
+                    {nParc}x de <span className="font-mono font-bold privacy-val tabular-nums">{fmtBRL(totalVal / nParc)}</span>/mês
                   </p>
                 );
               })()}
             </div>
 
             <div className="bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 space-y-3">
-              <label htmlFor="exp-paga" className="flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
+              <label htmlFor="exp-paga" className="min-h-[44px] flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
                 <input
                   id="exp-paga"
                   type="checkbox"
@@ -1489,7 +2001,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                     aria-label="Conta Bancária para débito"
                     value={expBankId}
                     onChange={(e) => setExpBankId(e.target.value)}
-                    className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-900 dark:text-white"
+                    className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-900 dark:text-white"
                   >
                     {state.bancos.map((b) => (
                       <option key={b.id} value={b.id}>
@@ -1505,15 +2017,15 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Lançamento
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
-                Adicionar Gasto
+                Registrar Gasto
               </button>
             </div>
           </form>
@@ -1532,7 +2044,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
             <div className="flex items-center justify-between">
               <h3 id="fintrack-modal-title" className="text-base font-bold text-slate-900 dark:text-white">Confirmar Quitação de Conta</h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div className="bg-slate-50 dark:bg-slate-800 rounded-xl p-4">
@@ -1540,7 +2052,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <div className="text-sm font-bold text-slate-900 dark:text-white mt-0.5">
                 {targetExpense.descricao}
               </div>
-              <div className="font-mono text-lg font-extrabold text-emerald-700 dark:text-emerald-400 mt-1 privacy-val">
+              <div className="font-mono text-lg font-extrabold text-emerald-700 dark:text-emerald-400 mt-1 privacy-val tabular-nums">
                 {fmtBRL(targetExpense.valor)}
               </div>
             </div>
@@ -1552,7 +2064,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 id="pay-bank"
                 value={payBankId}
                 onChange={(e) => setPayBankId(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               >
                 <option value="">Apenas marcar como paga (sem debitar de banco)</option>
                 {state.bancos.map((b) => (
@@ -1566,13 +2078,13 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Manter Pendente
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Confirmar Pagamento
               </button>
@@ -1580,7 +2092,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
           </form>
         )}
 
-        {/* MODAL: MOLDE DE CONTAS RECORRENTES */}
+        {/* MODAL: MOLDE DE CONTAS RECORRENTES (CRUD COMPLETO) */}
         {activeModal === 'templateModal' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -1588,47 +2100,208 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 Molde Central de Despesas Fixas Recorrentes
               </h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Toda conta ativa aqui é clonada automaticamente quando você avança para um novo mês.
+              Toda conta ativa cadastrada aqui é replicada automaticamente quando você consulta ou avança para um novo mês.
             </p>
 
-            <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-56 overflow-y-auto border-t border-b border-slate-100 dark:border-slate-800">
-              {state.despesasFixasMolde.map((m) => (
-                <div key={m.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
-                  <div>
-                    <span className="font-bold text-slate-900 dark:text-white">{m.descricao}</span>
-                    <span className="text-slate-400 mx-1.5">·</span>
-                    <span className="text-slate-500 dark:text-slate-400">
-                      Dia {m.diaVencimento} · <span className="privacy-val">{fmtBRL(m.valorPadrao)}</span>
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => onToggleTemplateItem(m.id)}
-                      className={`min-h-[44px] px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center justify-center ${
-                        m.ativa
-                          ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400'
-                          : 'bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300'
-                      }`}
-                    >
-                      {m.ativa ? 'Ativa' : 'Pausada'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onDeleteTemplateItem(m.id)}
-                      aria-label={`Remover ${m.descricao} do molde`}
-                      className="min-h-[44px] min-w-[44px] p-2 rounded-lg text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer inline-flex items-center justify-center"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
+            {state.despesasFixasMolde.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-900/40 p-4 text-center space-y-1">
+                <p className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                  Nenhuma despesa recorrente cadastrada
+                </p>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Cadastre contas mensais como aluguel, luz ou internet abaixo para automatizar todas as competências futuras.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800 max-h-64 overflow-y-auto border-t border-b border-slate-100 dark:border-slate-800">
+                {state.despesasFixasMolde.map((m) => {
+                  const isEditingThis = editingTplId === m.id;
+                  if (isEditingThis) {
+                    return (
+                      <form
+                        key={m.id}
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          setEditTplError(null);
+                          const descClean = editTplDesc.trim();
+                          const valNum = parseFloat(editTplVal);
+                          const diaNum = parseInt(editTplDia, 10);
+                          if (!descClean) {
+                            setEditTplError(
+                              'Não foi possível salvar a conta fixa. A descrição está em branco. Informe o nome da despesa recorrente.'
+                            );
+                            return;
+                          }
+                          if (!Number.isFinite(valNum) || valNum < 0) {
+                            setEditTplError(
+                              'Não foi possível salvar a conta fixa. O valor informado é inválido. Digite um valor igual ou maior que zero.'
+                            );
+                            return;
+                          }
+                          onUpdateTemplateItem({
+                            ...m,
+                            descricao: descClean,
+                            valorPadrao: valNum,
+                            diaVencimento: Number.isFinite(diaNum) ? Math.max(1, Math.min(31, diaNum)) : 10,
+                            categoria: editTplCat,
+                          });
+                          setEditingTplId(null);
+                        }}
+                        className="py-3 space-y-2.5 bg-slate-50/70 dark:bg-slate-800/40 px-2 rounded-lg my-1"
+                      >
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <div>
+                            <label htmlFor={`edit-tpl-desc-${m.id}`} className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+                              Descrição da Conta
+                            </label>
+                            <input
+                              id={`edit-tpl-desc-${m.id}`}
+                              type="text"
+                              required
+                              value={editTplDesc}
+                              onChange={(e) => setEditTplDesc(e.target.value)}
+                              className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-900 dark:text-white"
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor={`edit-tpl-val-${m.id}`} className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+                              Valor Padrão (R$)
+                            </label>
+                            <input
+                              id={`edit-tpl-val-${m.id}`}
+                              type="number"
+                              step="0.01"
+                              min={0}
+                              required
+                              value={editTplVal}
+                              onChange={(e) => setEditTplVal(e.target.value)}
+                              className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor={`edit-tpl-dia-${m.id}`} className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+                              Dia de Vencimento (1–31)
+                            </label>
+                            <input
+                              id={`edit-tpl-dia-${m.id}`}
+                              type="number"
+                              min={1}
+                              max={31}
+                              required
+                              value={editTplDia}
+                              onChange={(e) => setEditTplDia(e.target.value)}
+                              className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-900 dark:text-white tabular-nums"
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor={`edit-tpl-cat-${m.id}`} className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+                              Categoria
+                            </label>
+                            <select
+                              id={`edit-tpl-cat-${m.id}`}
+                              value={editTplCat}
+                              onChange={(e) => setEditTplCat(e.target.value as ExpenseItem['categoria'])}
+                              className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-900 dark:text-white"
+                            >
+                              {MODAL_EXPENSE_CATEGORIES.map((cat) => (
+                                <option key={cat} value={cat}>
+                                  {cat}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                        {editTplError && (
+                          <p role="alert" className="text-xs font-semibold text-rose-600 dark:text-rose-400">
+                            {editTplError}
+                          </p>
+                        )}
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingTplId(null);
+                              setEditTplError(null);
+                            }}
+                            className="min-h-[44px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                          >
+                            Cancelar Edição
+                          </button>
+                          <button
+                            type="submit"
+                            className="min-h-[44px] px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                          >
+                            Salvar Alterações
+                          </button>
+                        </div>
+                      </form>
+                    );
+                  }
+
+                  return (
+                    <div key={m.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-slate-900 dark:text-white truncate">{m.descricao}</span>
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                              m.ativa
+                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
+                                : 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-400'
+                            }`}
+                          >
+                            {m.ativa ? 'Ativa' : 'Pausada'}
+                          </span>
+                        </div>
+                        <div className="text-slate-500 dark:text-slate-400 mt-0.5">
+                          {m.categoria} · Dia {m.diaVencimento} · <span className="privacy-val tabular-nums font-mono">{fmtBRL(m.valorPadrao)}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingTplId(m.id);
+                            setEditTplDesc(m.descricao);
+                            setEditTplVal(String(m.valorPadrao));
+                            setEditTplDia(String(m.diaVencimento));
+                            setEditTplCat(m.categoria);
+                            setEditTplError(null);
+                          }}
+                          aria-label={`Editar conta fixa ${m.descricao}`}
+                          className="min-h-[44px] min-w-[44px] p-2 rounded-lg text-slate-500 dark:text-slate-400 hover:text-emerald-700 dark:hover:text-emerald-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer inline-flex items-center justify-center"
+                        >
+                          <Pencil className="w-4 h-4" aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onToggleTemplateItem(m.id)}
+                          className={`min-h-[44px] px-3 py-2 rounded-lg text-xs font-semibold cursor-pointer inline-flex items-center justify-center ${
+                            m.ativa
+                              ? 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
+                              : 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400 hover:bg-emerald-100'
+                          }`}
+                        >
+                          {m.ativa ? 'Pausar Conta' : 'Ativar Conta'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDeleteTemplateItem(m.id)}
+                          aria-label={`Remover ${m.descricao} do molde`}
+                          className="min-h-[44px] min-w-[44px] p-2 rounded-lg text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer inline-flex items-center justify-center"
+                        >
+                          <Trash2 className="w-4 h-4" aria-hidden="true" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
             <form
               onSubmit={(e) => {
@@ -1656,7 +2329,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   value={tplDesc}
                   onChange={(e) => setTplDesc(e.target.value)}
                   placeholder="Nome da conta fixa"
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white"
                 />
               </div>
               <div>
@@ -1672,7 +2345,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   value={tplVal}
                   onChange={(e) => setTplVal(e.target.value)}
                   placeholder="Valor (R$)"
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-900 dark:text-white privacy-val"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-900 dark:text-white privacy-val tabular-nums"
                 />
               </div>
               <div>
@@ -1687,7 +2360,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   value={tplDia}
                   onChange={(e) => setTplDia(e.target.value)}
                   placeholder="Dia venc."
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
               <div>
@@ -1698,21 +2371,21 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   id="tpl-cat"
                   value={tplCat}
                   onChange={(e) => setTplCat(e.target.value as any)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-900 dark:text-white"
                 >
-                  <option value="Moradia">Moradia</option>
-                  <option value="Conectividade">Conectividade</option>
-                  <option value="Utilidades">Utilidades</option>
-                  <option value="Alimentação">Alimentação</option>
-                  <option value="Saúde">Saúde</option>
-                  <option value="Assinaturas">Assinaturas</option>
+                  {MODAL_EXPENSE_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
                 </select>
               </div>
               <button
                 type="submit"
-                className="bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg px-3 py-2 text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg px-3 py-2 text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                + Cadastrar Fixa
+                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>Cadastrar Conta Fixa</span>
               </button>
             </form>
           </div>
@@ -1733,14 +2406,14 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 Orquestrador de Salário (Pague-se Primeiro)
               </h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div className="bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl p-4">
               <span className="text-xs text-emerald-800 dark:text-emerald-300 font-semibold">
                 Salário Líquido Apurado:
               </span>
-              <div className="font-mono text-2xl font-extrabold text-emerald-900 dark:text-white mt-0.5 privacy-val">
+              <div className="font-mono text-2xl font-extrabold text-emerald-900 dark:text-white mt-0.5 privacy-val tabular-nums">
                 {fmtBRL(state.salario.liquido)}
               </div>
             </div>
@@ -1752,7 +2425,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 id="sal-bank"
                 value={salBankId}
                 onChange={(e) => setSalBankId(e.target.value)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               >
                 {state.bancos.map((b) => (
                   <option key={b.id} value={b.id}>
@@ -1761,7 +2434,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 ))}
               </select>
             </div>
-            <label htmlFor="sal-auto-aporte" className="flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
+            <label htmlFor="sal-auto-aporte" className="min-h-[44px] flex items-center gap-2 text-xs font-semibold text-slate-800 dark:text-slate-200 cursor-pointer">
               <input
                 id="sal-auto-aporte"
                 type="checkbox"
@@ -1770,20 +2443,20 @@ export const AppModals: React.FC<AppModalsProps> = ({
               />
               <span>
                 Separar automaticamente os aportes programados das Caixinhas (
-                <span className="privacy-val">{fmtBRL(state.caixinhas.reduce((s, c) => s + c.aporteMensal, 0))}</span>)
+                <span className="privacy-val tabular-nums">{fmtBRL(state.caixinhas.reduce((s, c) => s + c.aporteMensal, 0))}</span>)
               </span>
             </label>
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Crédito
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Confirmar Recebimento
               </button>
@@ -1806,7 +2479,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 Regra da Data do Próximo Salário
               </h3>
               <button type="button" onClick={onClose} aria-label="Fechar janela" className="min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer">
-                <X className="w-4 h-4" />
+                <X className="w-4 h-4" aria-hidden="true" />
               </button>
             </div>
             <div>
@@ -1817,7 +2490,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 id="payday-type"
                 value={payType}
                 onChange={(e) => setPayType(e.target.value as any)}
-                className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
               >
                 <option value="quintoDiaUtil">5º Dia Útil do Mês (Padrão CLT)</option>
                 <option value="diaFixo">Dia Fixo do Mês (ex: dia 5, 15, 25, 30)</option>
@@ -1836,7 +2509,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   max={31}
                   value={payFixedDay}
                   onChange={(e) => setPayFixedDay(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm font-mono text-slate-900 dark:text-white tabular-nums"
                 />
               </div>
             )}
@@ -1850,7 +2523,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   type="date"
                   value={payExactDate}
                   onChange={(e) => setPayExactDate(e.target.value)}
-                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                  className="w-full min-h-[44px] bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
                 />
               </div>
             )}
@@ -1858,13 +2531,13 @@ export const AppModals: React.FC<AppModalsProps> = ({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                Cancelar
+                Cancelar Alteração
               </button>
               <button
                 type="submit"
-                className="px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
+                className="min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold cursor-pointer"
               >
                 Salvar Regra
               </button>
@@ -1883,27 +2556,53 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Seus dados ficam salvos localmente no navegador com total privacidade. Exporte backups em JSON ou planilhas CSV compatíveis com Excel.
+            <p className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed">
+              Seus dados ficam neste navegador. Exporte uma cópia assinada para restaurar em outro dispositivo com verificação de integridade.
             </p>
 
+            <div
+              role="status"
+              className={`rounded-xl border px-3.5 py-3 flex items-start gap-2.5 ${
+                daysSinceBackup !== null && daysSinceBackup < 30
+                  ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50/70 dark:bg-emerald-950/25 text-emerald-900 dark:text-emerald-200'
+                  : 'border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/25 text-amber-900 dark:text-amber-200'
+              }`}
+            >
+              <Clock className="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" />
+              <div className="space-y-0.5">
+                <strong className="text-xs font-bold block">{backupStatusText}</strong>
+                <span className="text-xs leading-relaxed block">
+                  {hasRegisteredData
+                    ? daysSinceBackup !== null && daysSinceBackup < 30
+                      ? 'Seu backup está em dia. Exporte novamente após alterações importantes.'
+                      : 'Exporte um backup agora para evitar perda dos dados locais.'
+                    : 'O backup ficará disponível assim que você cadastrar seus dados financeiros.'}
+                </span>
+              </div>
+            </div>
+
             <div className="space-y-2.5">
-              <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 flex items-center justify-between gap-3">
-                <div>
+              <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
                   <strong className="text-xs font-bold text-slate-900 dark:text-white block">
-                    Exportar Backup Completo (JSON)
+                    Exportar Backup Assinado (JSON v4.1)
                   </strong>
-                  <span className="text-xs text-slate-500 dark:text-slate-400">
-                    Compatível para restauração completa em qualquer dispositivo.
+                  <span className="text-xs text-slate-500 dark:text-slate-400 block leading-relaxed">
+                    Inclui assinatura SHA-256 para detectar corrupção ou alterações no arquivo.
                   </span>
+                  {vaultActive && (
+                    <span className="text-xs text-amber-800 dark:text-amber-300 block leading-relaxed pt-1">
+                      A assinatura não criptografa o JSON. Para proteger os dados no arquivo, use o backup .vault na área do cofre.
+                    </span>
+                  )}
                 </div>
                 <button
                   type="button"
-                  onClick={onExportJSON}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
+                  onClick={() => void onExportJSON()}
+                  className="min-h-[44px] px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer"
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Baixar JSON</span>
+                  <Download className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Exportar Backup</span>
                 </button>
               </div>
 
@@ -1919,7 +2618,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                 <button
                   type="button"
                   onClick={onExportCSV}
-                  className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0 cursor-pointer"
+                  className="min-h-[44px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 shrink-0 cursor-pointer"
                 >
                   Exportar CSV
                 </button>
@@ -1934,7 +2633,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                     Importa um arquivo JSON do seu dispositivo (compatível com a versão anterior).
                   </span>
                 </div>
-                <label className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 shrink-0 cursor-pointer focus-within:ring-2 focus-within:ring-emerald-500">
+                <label className="min-h-[44px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 inline-flex items-center gap-1.5 shrink-0 cursor-pointer focus-within:ring-2 focus-within:ring-emerald-500">
                   <Upload className="w-3.5 h-3.5" />
                   <span>Carregar</span>
                   <input
@@ -1968,7 +2667,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                     <button
                       type="button"
                       onClick={() => setConfirmReset(true)}
-                      className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shrink-0 cursor-pointer"
+                      className="min-h-[44px] px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold shrink-0 cursor-pointer"
                     >
                       Zerar Dados
                     </button>
@@ -1982,7 +2681,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                     <button
                       type="button"
                       onClick={() => setConfirmReset(false)}
-                      className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                      className="min-h-[44px] px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
                     >
                       Cancelar
                     </button>
@@ -1993,7 +2692,7 @@ export const AppModals: React.FC<AppModalsProps> = ({
                         onResetFactory();
                         onClose();
                       }}
-                      className="px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold cursor-pointer"
+                      className="min-h-[44px] px-3 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 text-white text-xs font-semibold cursor-pointer"
                     >
                       Confirmar Exclusão
                     </button>
@@ -2058,17 +2757,18 @@ export const AppModals: React.FC<AppModalsProps> = ({
                   </code>
                   <button
                     type="button"
-                    onClick={() => {
-                      navigator.clipboard?.writeText(lastGeneratedRecoveryKey);
-                      setVaultCopiedKey(true);
-                      setTimeout(() => setVaultCopiedKey(false), 2500);
-                    }}
+                    onClick={() => void handleCopyRecoveryKey(lastGeneratedRecoveryKey)}
                     className="min-h-[44px] px-3 py-2 rounded-lg bg-amber-700 hover:bg-amber-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer shrink-0"
                   >
                     {vaultCopiedKey ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{vaultCopiedKey ? 'Copiada' : 'Copiar'}</span>
+                    <span>{vaultCopiedKey ? 'Copiada' : 'Copiar Chave'}</span>
                   </button>
                 </div>
+                {vaultClipboardNotice && (
+                  <p role="status" className="text-xs text-amber-900 dark:text-amber-200 leading-relaxed">
+                    {vaultClipboardNotice}
+                  </p>
+                )}
               </div>
             )}
 
@@ -2242,6 +2942,133 @@ export const AppModals: React.FC<AppModalsProps> = ({
                     <span>Exportar Backup .vault</span>
                   </button>
                 </div>
+
+                <details className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/30">
+                  <summary className="min-h-[44px] px-3 py-2.5 flex items-center gap-2 text-xs font-bold text-slate-800 dark:text-slate-200 cursor-pointer select-none">
+                    <RefreshCw className="w-4 h-4 text-emerald-700 dark:text-emerald-400" aria-hidden="true" />
+                    <span>Rotacionar Senha Mestra</span>
+                  </summary>
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      setRotateError(null);
+                      setRotateSuccessMsg(null);
+                      const strength = evaluatePasswordStrength(rotateNewPwd);
+                      if (!rotateCurrentSecret.trim()) {
+                        setRotateError('Informe sua Senha Mestra ou Recovery Key atual para autorizar a rotação.');
+                        return;
+                      }
+                      if (!strength.valid) {
+                        setRotateError(strength.feedback);
+                        return;
+                      }
+                      if (rotateNewPwd !== rotateConfirmPwd) {
+                        setRotateError('A confirmação da nova senha não confere. Digite a mesma senha nos dois campos.');
+                        return;
+                      }
+
+                      setRotateBusy(true);
+                      try {
+                        const result = await onRotateVaultPassword(rotateCurrentSecret, rotateNewPwd);
+                        if (!result.ok) {
+                          setRotateError(result.error || 'Não foi possível rotacionar a senha. Tente novamente.');
+                          return;
+                        }
+                        setRotateCurrentSecret('');
+                        setRotateNewPwd('');
+                        setRotateConfirmPwd('');
+                        setRotateSuccessMsg('Senha rotacionada. A credencial e a Recovery Key anteriores deixaram de funcionar.');
+                      } finally {
+                        setRotateBusy(false);
+                      }
+                    }}
+                    className="space-y-3 border-t border-slate-200 dark:border-slate-800 p-3.5"
+                  >
+                    <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                      Uma nova Recovery Key será gerada. Guarde-a antes de fechar esta janela; a chave anterior será invalidada.
+                    </p>
+                    <div>
+                      <label htmlFor="vault-rotate-current" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+                        Senha Mestra ou Recovery Key atual
+                      </label>
+                      <input
+                        id="vault-rotate-current"
+                        type="password"
+                        autoComplete="current-password"
+                        required
+                        disabled={rotateBusy}
+                        value={rotateCurrentSecret}
+                        onChange={(e) => setRotateCurrentSecret(e.target.value)}
+                        className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label htmlFor="vault-rotate-new" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+                        Nova Senha Mestra
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="vault-rotate-new"
+                          type={rotateShowPwd ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          minLength={MIN_VAULT_PASSWORD_LENGTH}
+                          required
+                          disabled={rotateBusy}
+                          value={rotateNewPwd}
+                          onChange={(e) => setRotateNewPwd(e.target.value)}
+                          className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg pl-3 pr-12 py-2 text-sm text-slate-900 dark:text-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setRotateShowPwd((visible) => !visible)}
+                          aria-label={rotateShowPwd ? 'Ocultar nova senha' : 'Mostrar nova senha'}
+                          className="absolute right-0.5 top-1/2 -translate-y-1/2 min-h-[44px] min-w-[44px] inline-flex items-center justify-center rounded-lg text-slate-500 dark:text-slate-400 cursor-pointer"
+                        >
+                          {rotateShowPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                      {rotateNewPwd && (
+                        <p className="text-xs text-slate-600 dark:text-slate-400 mt-1.5">
+                          {evaluatePasswordStrength(rotateNewPwd).feedback}
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <label htmlFor="vault-rotate-confirm" className="text-xs font-semibold text-slate-600 dark:text-slate-400 block mb-1">
+                        Confirmar Nova Senha
+                      </label>
+                      <input
+                        id="vault-rotate-confirm"
+                        type={rotateShowPwd ? 'text' : 'password'}
+                        autoComplete="new-password"
+                        minLength={MIN_VAULT_PASSWORD_LENGTH}
+                        required
+                        disabled={rotateBusy}
+                        value={rotateConfirmPwd}
+                        onChange={(e) => setRotateConfirmPwd(e.target.value)}
+                        className="w-full min-h-[44px] bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-900 dark:text-white"
+                      />
+                    </div>
+                    {rotateError && (
+                      <p role="alert" className="text-xs font-semibold text-rose-700 dark:text-rose-300 leading-relaxed">
+                        {rotateError}
+                      </p>
+                    )}
+                    {rotateSuccessMsg && (
+                      <p role="status" className="text-xs font-semibold text-emerald-800 dark:text-emerald-300 leading-relaxed">
+                        {rotateSuccessMsg}
+                      </p>
+                    )}
+                    <button
+                      type="submit"
+                      disabled={rotateBusy}
+                      className="w-full min-h-[44px] px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <RefreshCw className="w-4 h-4" aria-hidden="true" />
+                      <span>{rotateBusy ? 'Rotacionando com segurança...' : 'Rotacionar Senha e Gerar Chave'}</span>
+                    </button>
+                  </form>
+                </details>
 
                 <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
                   {!confirmDeactivateVault ? (
@@ -2431,14 +3258,14 @@ export const AppModals: React.FC<AppModalsProps> = ({
                         setImportVaultSecret('');
                         setImportVaultError(null);
                       }}
-                      className="px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold cursor-pointer"
+                      className="min-h-[44px] px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-xs font-semibold cursor-pointer"
                     >
                       Cancelar
                     </button>
                     <button
                       type="submit"
                       disabled={importVaultBusy}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
+                      className="min-h-[44px] px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
                     >
                       {importVaultBusy ? 'Decifrando...' : 'Desbloquear & Importar'}
                     </button>

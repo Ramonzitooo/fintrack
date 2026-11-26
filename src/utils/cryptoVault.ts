@@ -10,6 +10,11 @@ export const MIN_KDF_ITERATIONS = 100_000;
 export const MAX_KDF_ITERATIONS = 2_000_000;
 export const MIN_VAULT_PASSWORD_LENGTH = 8;
 export const VAULT_SESSION_CONFIG_KEY = 'FINTRACK_VAULT_SESSION_CONFIG';
+export const VAULT_LOCKOUT_STORAGE_KEY = 'FINTRACK_VAULT_LOCKOUT_V1';
+export const MAX_FREE_UNLOCK_ATTEMPTS = 5;
+
+const BASE_LOCKOUT_COOLDOWN_SECONDS = 15;
+const MAX_LOCKOUT_COOLDOWN_SECONDS = 300;
 
 // Alfabeto Base32 inequívoco (32 caracteres, sem 0, O, 1, I) -> 5 bits por caractere
 const RECOVERY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -71,6 +76,26 @@ export interface VaultUnlockResult<T = unknown> {
   session: VaultSession;
   unlockedViaRecovery: boolean;
   migratedFromLegacy: boolean;
+}
+
+export interface VaultUnlockLockoutState {
+  failedAttempts: number;
+  lockedUntilMs: number;
+  remainingSeconds: number;
+  isLockedOut: boolean;
+}
+
+export interface VaultFailedUnlockRecord {
+  failedAttempts: number;
+  cooldownSeconds: number;
+  lockedUntilMs: number;
+}
+
+export interface RotateVaultPasswordResult<T = unknown> {
+  data: T;
+  envelope: VaultEnvelope;
+  session: VaultSession;
+  newRecoveryKey: string;
 }
 
 export interface LegacyVaultSecurityV34 {
@@ -805,11 +830,46 @@ export async function unlockVaultWithSession<T = unknown>(
   }
 
   const rec = envelope as unknown as Record<string, unknown>;
-  if (typeof rec.salt === 'string' && rec.salt.length > 0) {
-    return decryptV4Envelope<T>(envelope as VaultEnvelope, secret);
+  const result =
+    typeof rec.salt === 'string' && rec.salt.length > 0
+      ? await decryptV4Envelope<T>(envelope as VaultEnvelope, secret)
+      : await decryptLegacyV34Envelope<T>(envelope as LegacyVaultEnvelopeV34, secret, true);
+
+  resetVaultUnlockLockout();
+  return result;
+}
+
+/**
+ * Rotaciona a Senha Mestra do cofre 100% em memória sem jamais gravar texto claro:
+ * - Valida `newPassword` (`>= 8` caracteres).
+ * - Valida `currentSecret` (Senha Mestra atual ou Recovery Key) decifrando `currentEnvelope`.
+ * - Gera nova Recovery Key de 120 bits e novo Salt CSPRNG de 128 bits via `createVaultSession`,
+ *   invalidando a senha antiga e a Recovery Key antiga no novo envelope.
+ */
+export async function rotateVaultMasterPassword<T = unknown>(
+  currentEnvelope: unknown,
+  currentSecret: string,
+  newPassword: string
+): Promise<RotateVaultPasswordResult<T>> {
+  const pwdCheck = validateVaultPassword(newPassword);
+  if (!pwdCheck.valid) {
+    throw new Error(
+      pwdCheck.reason ??
+        `Não foi possível rotacionar a senha mestra. A nova senha deve ter no mínimo ${MIN_VAULT_PASSWORD_LENGTH} caracteres.`
+    );
   }
 
-  return decryptLegacyV34Envelope<T>(envelope as LegacyVaultEnvelopeV34, secret, true);
+  const data = await decryptVaultPayload<T>(currentEnvelope, currentSecret);
+  const newRecoveryKey = generateRecoveryKey();
+  const { envelope, session } = await createVaultSession(data, newPassword, newRecoveryKey);
+  resetVaultUnlockLockout();
+
+  return {
+    data,
+    envelope,
+    session,
+    newRecoveryKey,
+  };
 }
 
 /**
@@ -884,5 +944,134 @@ export function loadVaultSessionConfig(): VaultSessionConfig {
     };
   } catch {
     return fallback;
+  }
+}
+
+interface StoredVaultLockout {
+  failedAttempts: number;
+  lockedUntilMs: number;
+}
+
+let memoryLockoutFallback: StoredVaultLockout = {
+  failedAttempts: 0,
+  lockedUntilMs: 0,
+};
+let brokenLockoutStorageRef: Storage | null = null;
+
+function readStoredVaultLockout(): StoredVaultLockout {
+  try {
+    if (
+      typeof globalThis.localStorage !== 'undefined' &&
+      globalThis.localStorage !== null &&
+      globalThis.localStorage !== brokenLockoutStorageRef
+    ) {
+      const raw = globalThis.localStorage.getItem(VAULT_LOCKOUT_STORAGE_KEY);
+      if (!raw) {
+        return { failedAttempts: 0, lockedUntilMs: 0 };
+      }
+      const parsed = safeJsonParseNoProto<Partial<StoredVaultLockout>>(raw);
+      const failedAttempts =
+        typeof parsed?.failedAttempts === 'number' &&
+        Number.isFinite(parsed.failedAttempts) &&
+        parsed.failedAttempts > 0
+          ? Math.floor(parsed.failedAttempts)
+          : 0;
+      const lockedUntilMs =
+        typeof parsed?.lockedUntilMs === 'number' &&
+        Number.isFinite(parsed.lockedUntilMs) &&
+        parsed.lockedUntilMs > 0
+          ? Math.floor(parsed.lockedUntilMs)
+          : 0;
+      return { failedAttempts, lockedUntilMs };
+    }
+  } catch {
+    // localStorage indisponível (ex.: Node sem --localstorage-file ou modo privado restrito)
+  }
+  return { ...memoryLockoutFallback };
+}
+
+function writeStoredVaultLockout(record: StoredVaultLockout): void {
+  memoryLockoutFallback = { ...record };
+  try {
+    if (typeof globalThis.localStorage !== 'undefined' && globalThis.localStorage !== null) {
+      globalThis.localStorage.setItem(VAULT_LOCKOUT_STORAGE_KEY, JSON.stringify(record));
+      if (brokenLockoutStorageRef === globalThis.localStorage) {
+        brokenLockoutStorageRef = null;
+      }
+    }
+  } catch {
+    try {
+      if (typeof globalThis.localStorage !== 'undefined' && globalThis.localStorage !== null) {
+        brokenLockoutStorageRef = globalThis.localStorage;
+      }
+    } catch {
+      // Ignora indisponibilidade de localStorage
+    }
+  }
+}
+
+/**
+ * Consulta o estado atual do bloqueio anti-brute-force do cofre.
+ * Seguro em ambientes sem `localStorage` (ex.: Node.js).
+ */
+export function getVaultUnlockLockoutState(nowMs?: number): VaultUnlockLockoutState {
+  const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now();
+  const stored = readStoredVaultLockout();
+  const remainingMs = stored.lockedUntilMs > now ? stored.lockedUntilMs - now : 0;
+  const remainingSeconds = remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
+
+  return {
+    failedAttempts: stored.failedAttempts,
+    lockedUntilMs: stored.lockedUntilMs,
+    remainingSeconds,
+    isLockedOut: remainingMs > 0,
+  };
+}
+
+/**
+ * Registra uma falha consecutiva de desbloqueio do cofre com backoff exponencial:
+ * - Até 4 falhas: `cooldownSeconds = 0`.
+ * - A partir da 5ª falha: `15s` (5ª), `30s` (6ª), `60s` (7ª), `120s` (8ª+), limitado a `300s` (5 min),
+ *   persistindo `{ failedAttempts, lockedUntilMs }` em `localStorage` para resistir a F5/reload.
+ */
+export function recordFailedVaultUnlock(nowMs?: number): VaultFailedUnlockRecord {
+  const now = typeof nowMs === 'number' && Number.isFinite(nowMs) ? nowMs : Date.now();
+  const prev = readStoredVaultLockout();
+  const failedAttempts = prev.failedAttempts + 1;
+
+  let cooldownSeconds = 0;
+  let lockedUntilMs = 0;
+
+  if (failedAttempts >= MAX_FREE_UNLOCK_ATTEMPTS) {
+    const exponent = Math.min(10, failedAttempts - MAX_FREE_UNLOCK_ATTEMPTS);
+    cooldownSeconds = Math.min(
+      MAX_LOCKOUT_COOLDOWN_SECONDS,
+      BASE_LOCKOUT_COOLDOWN_SECONDS * Math.pow(2, exponent)
+    );
+    lockedUntilMs = Math.max(prev.lockedUntilMs, Math.floor(now + cooldownSeconds * 1000));
+  }
+
+  writeStoredVaultLockout({ failedAttempts, lockedUntilMs });
+
+  return {
+    failedAttempts,
+    cooldownSeconds,
+    lockedUntilMs,
+  };
+}
+
+/**
+ * Zera o contador de tentativas falhas e remove qualquer bloqueio ativo.
+ * Chamado automaticamente após desbloqueio bem-sucedido (`unlockVaultWithSession`).
+ */
+export function resetVaultUnlockLockout(): void {
+  memoryLockoutFallback = { failedAttempts: 0, lockedUntilMs: 0 };
+  brokenLockoutStorageRef = null;
+  try {
+    if (typeof globalThis.localStorage !== 'undefined' && globalThis.localStorage !== null) {
+      globalThis.localStorage.removeItem(VAULT_LOCKOUT_STORAGE_KEY);
+    }
+  } catch {
+    // Ignora indisponibilidade de localStorage
   }
 }

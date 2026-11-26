@@ -1,6 +1,8 @@
 import {
+  addMoney,
   BankAccount,
   Caixinha,
+  calculateOfficialPayrollTaxes,
   CreditCard,
   DebtItem,
   ExpenseItem,
@@ -12,10 +14,19 @@ import {
 } from './financeMath';
 
 export const STORAGE_KEY = 'APP_FINANCEIRO_V2_DATA';
+export const LAST_BACKUP_AT_KEY = 'FINTRACK_LAST_BACKUP_AT';
 export const MAX_BACKUP_FILE_BYTES = 10 * 1024 * 1024;
 export const MAX_COLLECTION_ITEMS = 2000;
 export const MAX_STRING_LEN = 300;
 const MAX_MONTH_BUCKETS = 240;
+
+export interface BackupEnvelopeV41 {
+  appName: 'FinTrack';
+  schemaVersion: '4.1';
+  exportedAt: string;
+  integritySha256: string;
+  data: AppState;
+}
 
 export interface HistoricalPayroll {
   id: string;
@@ -325,6 +336,14 @@ const VALID_ENVELOPE_CADENCIAS: ReadonlySet<EnvelopeConfig['cadencia']> = new Se
 ]);
 
 function extractSourcePayload(raw: any): any {
+  if (
+    (raw.schemaVersion === '4.1' || raw.appName === 'FinTrack') &&
+    raw.data &&
+    typeof raw.data === 'object' &&
+    !Array.isArray(raw.data)
+  ) {
+    return raw.data;
+  }
   if (raw.schemaVersion !== '3.4') return raw;
   return {
     bancos: raw.contasBancarias,
@@ -444,22 +463,28 @@ function parseSalario(rawSalario: any, fallback: AppState['salario']): AppState[
   if (!rawSalario || typeof rawSalario !== 'object') return fallback;
   const proventos = parsePayrollItems(rawSalario.proventos, 'p', 'Provento', fallback.proventos);
   const descontos = parsePayrollItems(rawSalario.descontos, 'd', 'Desconto', fallback.descontos);
-  const bruto = finiteNum(
-    proventos.reduce((s, p) => s + p.valor, 0),
-    0,
-    0
-  );
-  const descontosTotal = finiteNum(
-    descontos.reduce((s, d) => s + d.valor, 0),
-    0,
-    0
-  );
+  const bruto =
+    Math.round(
+      finiteNum(
+        proventos.reduce((s, p) => s + p.valor, 0),
+        0,
+        0
+      ) * 100
+    ) / 100;
+  const descontosTotal =
+    Math.round(
+      finiteNum(
+        descontos.reduce((s, d) => s + d.valor, 0),
+        0,
+        0
+      ) * 100
+    ) / 100;
   return {
     proventos,
     descontos,
     bruto,
     descontosTotal,
-    liquido: finiteNum(Math.max(0, bruto - descontosTotal), 0, 0),
+    liquido: finiteNum(Math.max(0, Math.round((bruto - descontosTotal) * 100) / 100), 0, 0),
   };
 }
 
@@ -691,9 +716,115 @@ const RECOGNIZED_IMPORT_KEYS = [
   'dividas',
 ] as const;
 
-export function validateImportJson(
+const BACKUP_SHA256_MISMATCH_ERROR =
+  'Não foi possível restaurar o backup. A assinatura de integridade SHA-256 não confere (arquivo corrompido ou adulterado). Exporte um novo arquivo íntegro ou selecione outro backup.';
+
+let memoryLastBackupAt: string | null = null;
+
+function getFunctionalLocalStorage(): Storage | null {
+  try {
+    const ls = globalThis.localStorage;
+    if (ls && typeof ls.getItem === 'function' && typeof ls.setItem === 'function') {
+      return ls;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function recordBackupTimestamp(nowIso?: string): void {
+  const ts =
+    typeof nowIso === 'string' && nowIso.trim().length > 0 && Number.isFinite(Date.parse(nowIso))
+      ? nowIso.trim()
+      : new Date().toISOString();
+  memoryLastBackupAt = ts;
+  const ls = getFunctionalLocalStorage();
+  if (ls) {
+    try {
+      ls.setItem(LAST_BACKUP_AT_KEY, ts);
+    } catch {
+      // Mantém carimbo em memória quando localStorage estiver indisponível ou sem cota
+    }
+  }
+}
+
+export function getDaysSinceLastBackup(now: Date = new Date()): number | null {
+  const ls = getFunctionalLocalStorage();
+  let raw: string | null = null;
+  if (ls) {
+    try {
+      raw = ls.getItem(LAST_BACKUP_AT_KEY);
+    } catch {
+      raw = memoryLastBackupAt;
+    }
+  } else {
+    raw = memoryLastBackupAt;
+  }
+
+  if (!raw || !raw.trim()) return null;
+  const lastMs = Date.parse(raw);
+  if (!Number.isFinite(lastMs)) return null;
+
+  const refMs =
+    now instanceof Date && Number.isFinite(now.getTime()) ? now.getTime() : Date.now();
+  const diffMs = refMs - lastMs;
+  if (diffMs <= 0) return 0;
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+export async function computeSha256Hex(text: string): Promise<string> {
+  const webCrypto = globalThis.crypto;
+  if (!webCrypto || !webCrypto.subtle || typeof webCrypto.subtle.digest !== 'function') {
+    throw new Error('W3C WebCrypto API indisponível para verificação SHA-256.');
+  }
+  const encoded = new TextEncoder().encode(String(text ?? ''));
+  const safeBytes = new Uint8Array(new ArrayBuffer(encoded.byteLength));
+  safeBytes.set(encoded);
+  const digest = await webCrypto.subtle.digest('SHA-256', safeBytes);
+  const hashBytes = new Uint8Array(digest);
+  let hex = '';
+  for (let i = 0; i < hashBytes.length; i++) {
+    hex += hashBytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+function constantTimeSha256Equal(computedHex: string, candidateHex: string): boolean {
+  const expectedLen = computedHex.length;
+  let diff = candidateHex.length ^ expectedLen;
+  for (let i = 0; i < expectedLen; i++) {
+    const ca = computedHex.charCodeAt(i);
+    const cb = i < candidateHex.length ? candidateHex.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
+  }
+  return diff === 0;
+}
+
+export async function createBackupEnvelopeV41(
+  state: AppState,
+  exportedAt?: string
+): Promise<BackupEnvelopeV41> {
+  const cleanData = safeJsonParse(JSON.stringify(state)) as AppState;
+  const serializedState = JSON.stringify(cleanData);
+  const integritySha256 = await computeSha256Hex(serializedState);
+  const timestamp =
+    typeof exportedAt === 'string' && exportedAt.trim().length > 0
+      ? exportedAt.trim()
+      : new Date().toISOString();
+
+  return {
+    appName: 'FinTrack',
+    schemaVersion: '4.1',
+    exportedAt: timestamp,
+    integritySha256,
+    data: cleanData,
+  };
+}
+
+function parseImportRawJson(
   rawText: string
-): { ok: true; state: AppState } | { ok: false; error: string } {
+): { ok: true; parsed: Record<string, any> } | { ok: false; error: string } {
   if (typeof rawText !== 'string') {
     return { ok: false, error: 'Arquivo vazio ou formato inválido.' };
   }
@@ -739,6 +870,60 @@ export function validateImportJson(
     return { ok: false, error: 'Estrutura inválida: esperado um objeto JSON na raiz.' };
   }
 
+  return { ok: true, parsed: parsed as Record<string, any> };
+}
+
+export function validateImportJson(
+  rawText: string
+): { ok: true; state: AppState } | { ok: false; error: string } {
+  const baseCheck = parseImportRawJson(rawText);
+  if (!baseCheck.ok) return baseCheck;
+
+  const src = extractSourcePayload(baseCheck.parsed);
+  const hasRecognizedKey = RECOGNIZED_IMPORT_KEYS.some(
+    (k) => src && typeof src === 'object' && k in src && src[k] !== undefined
+  );
+
+  if (!hasRecognizedKey) {
+    return {
+      ok: false,
+      error: 'O arquivo não contém nenhuma estrutura reconhecida do FinTrack.',
+    };
+  }
+
+  return { ok: true, state: normalizeState(baseCheck.parsed) };
+}
+
+export async function verifyAndImportBackupJson(
+  rawText: string
+): Promise<{ ok: true; state: AppState; verifiedHash: boolean } | { ok: false; error: string }> {
+  const baseCheck = parseImportRawJson(rawText);
+  if (!baseCheck.ok) return baseCheck;
+
+  const { parsed } = baseCheck;
+  let verifiedHash = false;
+
+  const hasIntegrityField =
+    Object.prototype.hasOwnProperty.call(parsed, 'integritySha256') &&
+    parsed.integritySha256 !== undefined;
+
+  if (hasIntegrityField || parsed.schemaVersion === '4.1') {
+    if (
+      typeof parsed.integritySha256 !== 'string' ||
+      !parsed.data ||
+      typeof parsed.data !== 'object' ||
+      Array.isArray(parsed.data)
+    ) {
+      return { ok: false, error: BACKUP_SHA256_MISMATCH_ERROR };
+    }
+
+    const recomputedHash = await computeSha256Hex(JSON.stringify(parsed.data));
+    if (!constantTimeSha256Equal(recomputedHash, parsed.integritySha256)) {
+      return { ok: false, error: BACKUP_SHA256_MISMATCH_ERROR };
+    }
+    verifiedHash = true;
+  }
+
   const src = extractSourcePayload(parsed);
   const hasRecognizedKey = RECOGNIZED_IMPORT_KEYS.some(
     (k) => src && typeof src === 'object' && k in src && src[k] !== undefined
@@ -751,7 +936,271 @@ export function validateImportJson(
     };
   }
 
-  return { ok: true, state: normalizeState(parsed) };
+  return {
+    ok: true,
+    state: normalizeState(parsed),
+    verifiedHash,
+  };
+}
+
+export function createDemoSampleState(competencia?: string): AppState {
+  const comp =
+    typeof competencia === 'string' && /^\d{4}-\d{2}$/.test(competencia)
+      ? competencia
+      : getLocalMonthKey();
+  const bruto = 6500;
+  const taxes = calculateOfficialPayrollTaxes(bruto, 0);
+  const descontosTotal = addMoney(taxes.inss, taxes.irrf);
+  const liquido = taxes.estimatedNetSalary;
+
+  const proventos: PayrollItem[] = [
+    { id: 'prov_demo_clt', nome: 'Salário Base CLT', valor: bruto },
+  ];
+  const descontos: PayrollItem[] = [
+    { id: 'desc_demo_inss', nome: 'INSS Progressivo 2026', valor: taxes.inss },
+    { id: 'desc_demo_irrf', nome: 'IRRF Oficial (Lei 15.270/2025)', valor: taxes.irrf },
+  ];
+
+  return {
+    salario: {
+      proventos,
+      descontos,
+      bruto,
+      descontosTotal,
+      liquido,
+    },
+    historicoContracheques: [
+      {
+        id: 'hist_demo_1',
+        competencia: comp,
+        mesLabel: formatMonthYear(comp),
+        proventos: structuredClone(proventos),
+        descontos: structuredClone(descontos),
+        bruto,
+        descontosTotal,
+        liquido,
+      },
+    ],
+    bancos: [
+      {
+        id: 'b_demo_nubank',
+        nome: 'Nubank',
+        tipo: 'Conta Digital',
+        saldo: 3450,
+        rendeJuros: true,
+        pctCDI: 100,
+      },
+      {
+        id: 'b_demo_itau',
+        nome: 'Itaú Unibanco',
+        tipo: 'Conta Corrente',
+        saldo: 1280.5,
+        rendeJuros: false,
+        pctCDI: 0,
+      },
+    ],
+    caixinhas: [
+      {
+        id: 'cx_demo_emergencia',
+        nome: 'Reserva de Emergência',
+        saldo: 14500,
+        aporteMensal: 600,
+        meta: 18000,
+        tipo: 'emergencia',
+        instituicao: 'Nubank',
+        pctCDI: 100,
+      },
+      {
+        id: 'cx_demo_viagem',
+        nome: 'Viagem Férias Nordeste',
+        saldo: 3200,
+        aporteMensal: 350,
+        meta: 6000,
+        tipo: 'viagem',
+        instituicao: 'Nubank',
+        pctCDI: 100,
+      },
+      {
+        id: 'cx_demo_fire',
+        nome: 'Aposentadoria FIRE',
+        saldo: 42000,
+        aporteMensal: 800,
+        meta: 900000,
+        tipo: 'aposentadoria',
+        instituicao: 'Itaú Unibanco',
+        pctCDI: 105,
+      },
+    ],
+    cartoes: [
+      {
+        id: 'card_demo_nubank',
+        nome: 'Nubank Ultravioleta',
+        diaCorte: 10,
+        diaVencimento: 17,
+        beneficio: 'Cashback',
+        limiteTotal: 12000,
+        faturaAtual: 1420.8,
+      },
+    ],
+    dividas: [],
+    competenciaAtual: comp,
+    despesasFixasMolde: [
+      {
+        id: 'm_demo_aluguel',
+        descricao: 'Aluguel + Condomínio',
+        valorPadrao: 1850,
+        diaVencimento: 10,
+        categoria: 'Moradia',
+        ativa: true,
+      },
+      {
+        id: 'm_demo_luz',
+        descricao: 'Energia Elétrica',
+        valorPadrao: 195.4,
+        diaVencimento: 15,
+        categoria: 'Utilidades',
+        ativa: true,
+      },
+      {
+        id: 'm_demo_net',
+        descricao: 'Internet Fibra 600Mb',
+        valorPadrao: 119.9,
+        diaVencimento: 20,
+        categoria: 'Conectividade',
+        ativa: true,
+      },
+    ],
+    despesasPorMes: {
+      [comp]: [
+        {
+          id: `d_demo_${comp.replace('-', '')}_1`,
+          moldeId: 'm_demo_aluguel',
+          descricao: 'Aluguel + Condomínio',
+          valor: 1850,
+          diaVencimento: 10,
+          paga: true,
+          categoria: 'Moradia',
+          natureza: 'essencial',
+          dataPagamento: `${comp}-10`,
+          contaOrigem: 'Itaú Unibanco',
+          contaOrigemId: 'b_demo_itau',
+          formaPagamento: 'Pix',
+        },
+        {
+          id: `d_demo_${comp.replace('-', '')}_2`,
+          moldeId: null,
+          descricao: 'Supermercado Mensal',
+          valor: 680.5,
+          diaVencimento: 8,
+          paga: true,
+          categoria: 'Alimentação',
+          natureza: 'essencial',
+          dataPagamento: `${comp}-08`,
+          contaOrigem: 'Nubank',
+          contaOrigemId: 'b_demo_nubank',
+          formaPagamento: 'Pix / Débito',
+        },
+        {
+          id: `d_demo_${comp.replace('-', '')}_3`,
+          moldeId: null,
+          descricao: 'Streaming & Música',
+          valor: 55.9,
+          diaVencimento: 12,
+          paga: true,
+          categoria: 'Assinaturas',
+          natureza: 'estilo_vida',
+          dataPagamento: `${comp}-12`,
+          contaOrigem: 'Nubank',
+          contaOrigemId: 'b_demo_nubank',
+          formaPagamento: 'Cartão de Crédito',
+        },
+        {
+          id: `d_demo_${comp.replace('-', '')}_4`,
+          moldeId: 'm_demo_luz',
+          descricao: 'Energia Elétrica',
+          valor: 195.4,
+          diaVencimento: 15,
+          paga: false,
+          categoria: 'Utilidades',
+          natureza: 'essencial',
+          dataPagamento: null,
+          contaOrigem: null,
+          contaOrigemId: null,
+          formaPagamento: 'Pix',
+        },
+        {
+          id: `d_demo_${comp.replace('-', '')}_5`,
+          moldeId: 'm_demo_net',
+          descricao: 'Internet Fibra 600Mb',
+          valor: 119.9,
+          diaVencimento: 20,
+          paga: false,
+          categoria: 'Conectividade',
+          natureza: 'essencial',
+          dataPagamento: null,
+          contaOrigem: null,
+          contaOrigemId: null,
+          formaPagamento: 'Pix',
+        },
+        {
+          id: `d_demo_${comp.replace('-', '')}_6`,
+          moldeId: null,
+          descricao: 'Restaurante & Cinema',
+          valor: 210,
+          diaVencimento: 25,
+          paga: false,
+          categoria: 'Lazer',
+          natureza: 'estilo_vida',
+          dataPagamento: null,
+          contaOrigem: null,
+          contaOrigemId: null,
+          formaPagamento: 'Cartão de Crédito',
+        },
+        {
+          id: `d_demo_${comp.replace('-', '')}_7`,
+          moldeId: null,
+          descricao: 'Combustível & Mobilidade',
+          valor: 280,
+          diaVencimento: 28,
+          paga: false,
+          categoria: 'Transporte',
+          natureza: 'essencial',
+          dataPagamento: null,
+          contaOrigem: null,
+          contaOrigemId: null,
+          formaPagamento: 'Pix / Débito',
+        },
+      ],
+    },
+    receitasPorMes: {
+      [comp]: [
+        {
+          id: `rec_demo_${comp.replace('-', '')}_1`,
+          descricao: 'Projeto Freela Front-end',
+          valor: 950,
+          categoria: 'Freelance',
+          data: `${comp}-14`,
+          recebida: true,
+          contaDestinoId: 'b_demo_nubank',
+        },
+      ],
+    },
+    configPagamento: {
+      tipo: 'quintoDiaUtil',
+      diaFixo: 5,
+      dataExata: null,
+    },
+    envelopes: {
+      supermercado: { total: 1000, cadencia: 'semanal' },
+      lazer: { total: 400, cadencia: 'fds' },
+      combustivel: { total: 350, cadencia: 'semanal' },
+    },
+    configuracoes: {
+      taxaCdiAnual: 10.75,
+      swrAnualPct: 4.0,
+      jurosReaisAnualPct: 5.0,
+    },
+  };
 }
 
 export function fmtBRL(val: number): string {

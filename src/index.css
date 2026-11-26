@@ -104,9 +104,22 @@ body.privacy-mode .privacy-val:focus-within {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
-select:focus-visible {
+select:focus-visible,
+textarea:focus-visible {
   outline: 2.5px solid #059669;
   outline-offset: 2px;
+}
+
+/* Mobile horizontal tab strip with subtle scroll-affordance edge fade */
+.mobile-tabs-scroll {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 24px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 0%, #000 calc(100% - 24px), transparent 100%);
+}
+
+.mobile-tabs-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 /* Apple WWDC §14: Reduced motion, reduced transparency & high contrast */
@@ -147,10 +160,15 @@ select:focus-visible {
   .apple-glass-sheet {
     border-width: 2px !important;
   }
+  .mobile-tabs-scroll {
+    mask-image: none !important;
+    -webkit-mask-image: none !important;
+  }
   button:focus-visible,
   a:focus-visible,
   input:focus-visible,
-  select:focus-visible {
+  select:focus-visible,
+  textarea:focus-visible {
     outline-width: 3px !important;
   }
 }

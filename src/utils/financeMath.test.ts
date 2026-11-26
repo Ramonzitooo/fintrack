@@ -37,15 +37,25 @@ import {
   sumMonthlyExtraIncome,
   generateInstallmentExpenses,
   simulateDebtPayoff,
+  calculateCategoryBreakdown,
+  generateFireWealthCurve,
+  classifyExpenseDueStatus,
 } from './financeMath.ts';
 import {
   MAX_BACKUP_FILE_BYTES,
   MAX_COLLECTION_ITEMS,
   MAX_STRING_LEN,
+  LAST_BACKUP_AT_KEY,
   sanitizeCsvCell,
   safeJsonParse,
   normalizeState,
   validateImportJson,
+  recordBackupTimestamp,
+  getDaysSinceLastBackup,
+  computeSha256Hex,
+  createBackupEnvelopeV41,
+  verifyAndImportBackupJson,
+  createDemoSampleState,
 } from './storage.ts';
 
 test('annualToMonthlyRate uses exact compound equivalence instead of linear division by 12', () => {
@@ -1021,6 +1031,234 @@ test('35. MEDIO-02: normalizeState clamps 1e308 to MAX_SAFE_MONEY, truncates/cle
   assert.equal(norm.despesasPorMes['2000-01'][0].totalParcelas, MAX_INSTALLMENTS);
 });
 
+test('36. v4.1 Signed Backup Envelope (SHA-256) & Freshness Monitor: accepts intact, rejects 1-cent tamper, supports v4.0/v3.4 legacy', async () => {
+  // Vetor oficial NIST SHA-256 para "abc"
+  const abcHash = await computeSha256Hex('abc');
+  assert.equal(abcHash, 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
 
+  // Monitor de frescor de backup
+  assert.equal(LAST_BACKUP_AT_KEY, 'FINTRACK_LAST_BACKUP_AT');
+  assert.equal(getDaysSinceLastBackup(new Date('2026-11-24T12:00:00.000Z')), null);
+  recordBackupTimestamp('2026-11-14T10:00:00.000Z');
+  assert.equal(getDaysSinceLastBackup(new Date('2026-11-24T15:00:00.000Z')), 10);
+  assert.equal(getDaysSinceLastBackup(new Date('2026-11-14T12:00:00.000Z')), 0);
 
+  // 1. Backup v4.1 íntegro (incluindo formatação indentada JSON.stringify(..., null, 2))
+  const demoState = createDemoSampleState('2026-11');
+  const envelope = await createBackupEnvelopeV41(demoState, '2026-11-24T10:00:00.000Z');
+  assert.equal(envelope.appName, 'FinTrack');
+  assert.equal(envelope.schemaVersion, '4.1');
+  assert.equal(envelope.exportedAt, '2026-11-24T10:00:00.000Z');
+  assert.match(envelope.integritySha256, /^[0-9a-f]{64}$/);
 
+  const validImport = await verifyAndImportBackupJson(JSON.stringify(envelope, null, 2));
+  assert.equal(validImport.ok, true);
+  if (validImport.ok) {
+    assert.equal(validImport.verifiedHash, true);
+    assert.deepEqual(validImport.state, demoState);
+  }
+
+  // 2. Backup v4.1 adulterado em +1 centavo após gerar o hash -> DEVE rejeitar com erro em 3 partes
+  const tamperedEnvelope = structuredClone(envelope);
+  tamperedEnvelope.data.bancos[0].saldo = addMoney(tamperedEnvelope.data.bancos[0].saldo, 0.01);
+  const tamperedImport = await verifyAndImportBackupJson(JSON.stringify(tamperedEnvelope, null, 2));
+  assert.equal(tamperedImport.ok, false);
+  if (!tamperedImport.ok) {
+    assert.equal(
+      tamperedImport.error,
+      'Não foi possível restaurar o backup. A assinatura de integridade SHA-256 não confere (arquivo corrompido ou adulterado). Exporte um novo arquivo íntegro ou selecione outro backup.'
+    );
+  }
+
+  // Tentativa de bypass trocando integritySha256 por null ou string truncada
+  const nullHashAttempt = await verifyAndImportBackupJson(
+    JSON.stringify({ ...envelope, integritySha256: null })
+  );
+  assert.equal(nullHashAttempt.ok, false);
+
+  // 3. Backup legado v4.0 (sem integritySha256) -> aceito com verifiedHash: false
+  const legacyV40Import = await verifyAndImportBackupJson(JSON.stringify(demoState));
+  assert.equal(legacyV40Import.ok, true);
+  if (legacyV40Import.ok) {
+    assert.equal(legacyV40Import.verifiedHash, false);
+    assert.deepEqual(legacyV40Import.state, demoState);
+  }
+
+  // 4. Backup legado v3.4 (sem integritySha256) -> aceito com verifiedHash: false
+  const legacyV34Import = await verifyAndImportBackupJson(
+    JSON.stringify({
+      schemaVersion: '3.4',
+      contasBancarias: [{ id: 'b1', nome: 'Nubank', saldo: 1200, rendeJuros: true }],
+      configuracoes: { competenciaAtual: '2026-11' },
+    })
+  );
+  assert.equal(legacyV34Import.ok, true);
+  if (legacyV34Import.ok) {
+    assert.equal(legacyV34Import.verifiedHash, false);
+    assert.equal(legacyV34Import.state.bancos[0].saldo, 1200);
+  }
+});
+
+test('37. v4.1 Demo Sample State: passes cleanly through normalizeState with realistic BR CLT 2026 payroll and coherent balances', () => {
+  const demo = createDemoSampleState('2026-11');
+  const normalized = normalizeState(demo);
+
+  // Deve passar idempotente por normalizeState sem perder ou truncar nenhum campo
+  assert.deepEqual(normalized, demo);
+
+  // Coerência salarial CLT R$ 6.500 bruto com INSS/IRRF 2026 oficiais
+  const officialTaxes = calculateOfficialPayrollTaxes(6500, 0);
+  assert.equal(demo.salario.bruto, 6500);
+  assert.equal(demo.salario.descontosTotal, addMoney(officialTaxes.inss, officialTaxes.irrf));
+  assert.equal(demo.salario.liquido, officialTaxes.estimatedNetSalary);
+  assert.ok(demo.salario.liquido > 0);
+
+  // 2 contas (Nubank / Itaú), 3 caixinhas (Emergência / Viagem / FIRE), 1 cartão, molde fixo, despesas pagas+pendentes e 1 freela
+  assert.equal(demo.bancos.length, 2);
+  assert.ok(demo.bancos.some((b) => /nubank/i.test(b.nome)));
+  assert.ok(demo.bancos.some((b) => /ita[uú]/i.test(b.nome)));
+  assert.ok(demo.bancos.every((b) => Number.isFinite(b.saldo) && b.saldo > 0));
+
+  assert.equal(demo.caixinhas.length, 3);
+  assert.deepEqual(
+    new Set(demo.caixinhas.map((c) => c.tipo)),
+    new Set(['emergencia', 'viagem', 'aposentadoria'])
+  );
+  assert.ok(demo.caixinhas.every((c) => Number.isFinite(c.saldo) && c.saldo > 0 && c.aporteMensal > 0));
+
+  assert.equal(demo.cartoes.length, 1);
+  assert.ok(demo.despesasFixasMolde.length >= 2);
+
+  const monthExpenses = demo.despesasPorMes['2026-11'];
+  assert.ok(Array.isArray(monthExpenses) && monthExpenses.length >= 4);
+  assert.ok(monthExpenses.some((e) => e.paga === true));
+  assert.ok(monthExpenses.some((e) => e.paga === false));
+  assert.ok(monthExpenses.every((e) => Number.isFinite(e.valor) && e.valor > 0));
+
+  const monthIncomes = demo.receitasPorMes['2026-11'];
+  assert.equal(monthIncomes.length, 1);
+  assert.ok(monthIncomes[0].valor > 0);
+
+  // Saldo livre real positivo (bancos cobrem as contas pendentes com folga saudável)
+  const totalBanks = sumMoney(demo.bancos.map((b) => b.saldo));
+  const pendingTotal = sumMoney(monthExpenses.filter((e) => !e.paga).map((e) => e.valor));
+  assert.ok(subMoney(totalBanks, pendingTotal) >= 300);
+});
+
+test('38. v4.1 Analytics Engine: calculateCategoryBreakdown, generateFireWealthCurve, and classifyExpenseDueStatus', () => {
+  // 1. calculateCategoryBreakdown: centavos exatos, ordenação decrescente e percentual 1 casa decimal
+  assert.deepEqual(calculateCategoryBreakdown([]), []);
+
+  const breakdown = calculateCategoryBreakdown([
+    {
+      id: 'e1',
+      moldeId: null,
+      descricao: 'Feira A',
+      valor: 0.1,
+      diaVencimento: 5,
+      paga: true,
+      categoria: 'Alimentação',
+      dataPagamento: '2026-11-05',
+      contaOrigem: 'Nubank',
+    },
+    {
+      id: 'e2',
+      moldeId: null,
+      descricao: 'Feira B',
+      valor: 0.2,
+      diaVencimento: 12,
+      paga: false,
+      categoria: 'Alimentação',
+      dataPagamento: null,
+      contaOrigem: null,
+    },
+    {
+      id: 'e3',
+      moldeId: null,
+      descricao: 'Cinema',
+      valor: 0.7,
+      diaVencimento: 20,
+      paga: false,
+      categoria: 'Lazer',
+      dataPagamento: null,
+      contaOrigem: null,
+    },
+  ]);
+
+  assert.equal(breakdown.length, 2);
+  assert.equal(breakdown[0].categoria, 'Lazer');
+  assert.equal(breakdown[0].valor, 0.7);
+  assert.equal(breakdown[0].percentual, 70);
+  assert.equal(breakdown[0].count, 1);
+  assert.equal(breakdown[0].isEssential, false);
+
+  assert.equal(breakdown[1].categoria, 'Alimentação');
+  assert.equal(breakdown[1].valor, 0.3);
+  assert.equal(breakdown[1].percentual, 30);
+  assert.equal(breakdown[1].count, 2);
+  assert.equal(breakdown[1].isEssential, true);
+
+  // 2. generateFireWealthCurve: year 0..N, limites [1, 50], juros compostos reais
+  const defaultCurve = generateFireWealthCurve({
+    currentPatrimony: 10000,
+    monthlyContribution: 1000,
+  });
+  assert.equal(defaultCurve.length, 21); // years 0..20
+  assert.deepEqual(defaultCurve[0], {
+    year: 0,
+    totalInvested: 10000,
+    totalCompound: 10000,
+  });
+  assert.equal(defaultCurve[1].year, 1);
+  assert.equal(defaultCurve[1].totalInvested, 22000); // 10k + 12 * 1k
+  assert.ok(defaultCurve[1].totalCompound > defaultCurve[1].totalInvested);
+  assert.equal(defaultCurve[20].totalInvested, 250000); // 10k + 240 * 1k
+  assert.ok(defaultCurve[20].totalCompound > defaultCurve[20].totalInvested);
+
+  // Clamp years [1, 50] e taxa 0%
+  const minClamped = generateFireWealthCurve({
+    currentPatrimony: 5000,
+    monthlyContribution: 500,
+    annualRealRatePct: 0,
+    years: 0,
+  });
+  assert.equal(minClamped.length, 2); // 0..1
+  assert.equal(minClamped[1].totalInvested, 11000);
+  assert.equal(minClamped[1].totalCompound, 11000);
+
+  const maxClamped = generateFireWealthCurve({
+    currentPatrimony: 1000,
+    monthlyContribution: 100,
+    years: 999,
+  });
+  assert.equal(maxClamped.length, 51); // 0..50
+  assert.equal(maxClamped[50].year, 50);
+
+  // 3. classifyExpenseDueStatus: paga | vencida | vence_breve | no_prazo
+  const refToday = new Date(2026, 10, 10, 15, 30, 0); // 10/11/2026
+  assert.equal(
+    classifyExpenseDueStatus({ paga: true, diaVencimento: 1 }, '2026-11', refToday),
+    'paga'
+  );
+  assert.equal(
+    classifyExpenseDueStatus({ paga: false, diaVencimento: 9 }, '2026-11', refToday),
+    'vencida'
+  );
+  assert.equal(
+    classifyExpenseDueStatus({ paga: false, diaVencimento: 10 }, '2026-11', refToday),
+    'vence_breve'
+  );
+  assert.equal(
+    classifyExpenseDueStatus({ paga: false, diaVencimento: 13 }, '2026-11', refToday),
+    'vence_breve'
+  );
+  assert.equal(
+    classifyExpenseDueStatus({ paga: false, diaVencimento: 14 }, '2026-11', refToday),
+    'no_prazo'
+  );
+  // Clamp de fevereiro (dia 31 em 2026-02 vira 28/02/2026; em 26/02 faltam 2 dias -> vence_breve)
+  assert.equal(
+    classifyExpenseDueStatus({ paga: false, diaVencimento: 31 }, '2026-02', new Date(2026, 1, 26)),
+    'vence_breve'
+  );
+});

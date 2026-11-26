@@ -1335,3 +1335,159 @@ export function simulateDebtPayoff(
   };
 }
 
+export interface CategoryBreakdownItem {
+  categoria: string;
+  valor: number;
+  percentual: number;
+  count: number;
+  isEssential: boolean;
+}
+
+/**
+ * Agrupa despesas em centavos exatos por categoria, ordena por valor decrescente
+ * e calcula a participação percentual (0–100 com 1 casa decimal) para gráficos SVG.
+ */
+export function calculateCategoryBreakdown(expenses: ExpenseItem[]): CategoryBreakdownItem[] {
+  if (!Array.isArray(expenses) || expenses.length === 0) return [];
+
+  const buckets = new Map<
+    string,
+    { cents: number; count: number; essentialCents: number }
+  >();
+  let totalCents = 0;
+
+  for (const exp of expenses) {
+    if (!exp || typeof exp !== 'object') continue;
+    const valCents = Math.max(0, toCents(exp.valor));
+    if (valCents <= 0) continue;
+
+    const cat = String(exp.categoria || 'Outros').trim() || 'Outros';
+    const essential = isEssentialCategory(cat as ExpenseItem['categoria'], exp.natureza);
+    const existing = buckets.get(cat);
+
+    if (existing) {
+      existing.cents += valCents;
+      existing.count += 1;
+      if (essential) existing.essentialCents += valCents;
+    } else {
+      buckets.set(cat, {
+        cents: valCents,
+        count: 1,
+        essentialCents: essential ? valCents : 0,
+      });
+    }
+    totalCents += valCents;
+  }
+
+  if (totalCents <= 0 || buckets.size === 0) return [];
+
+  return Array.from(buckets.entries())
+    .sort((a, b) => b[1].cents - a[1].cents || a[0].localeCompare(b[0], 'pt-BR'))
+    .map(([categoria, bucket]) => {
+      const isEssential =
+        bucket.essentialCents === bucket.cents
+          ? true
+          : bucket.essentialCents === 0
+            ? false
+            : bucket.essentialCents >= bucket.cents / 2;
+
+      return {
+        categoria,
+        valor: fromCents(bucket.cents),
+        percentual: Math.round((bucket.cents / totalCents) * 1000) / 10,
+        count: bucket.count,
+        isEssential,
+      };
+    });
+}
+
+export interface FireCurvePoint {
+  year: number;
+  totalInvested: number;
+  totalCompound: number;
+}
+
+/**
+ * Gera curva patrimonial anual (year: 0..N, N limitado a [1, 50], padrão 20 anos,
+ * taxa real padrão 5% a.a. composta mensalmente) comparando capital investido vs juros compostos.
+ */
+export function generateFireWealthCurve(params: {
+  currentPatrimony: number;
+  monthlyContribution: number;
+  annualRealRatePct?: number;
+  years?: number;
+}): FireCurvePoint[] {
+  const pvCents = Math.max(0, toCents(params.currentPatrimony));
+  const pmtCents = Math.max(0, toCents(params.monthlyContribution));
+  const pv = fromCents(pvCents);
+  const pmt = fromCents(pmtCents);
+
+  const rawYears = params.years === undefined ? 20 : Number(params.years);
+  const totalYears = Number.isFinite(rawYears)
+    ? Math.max(1, Math.min(50, Math.trunc(Math.round(rawYears))))
+    : 20;
+
+  const rawRate = params.annualRealRatePct === undefined ? 5 : Number(params.annualRealRatePct);
+  const safeAnnualRatePct = Number.isFinite(rawRate) ? Math.max(0, Math.min(100, rawRate)) : 5;
+  const monthlyRate = annualToMonthlyRate(safeAnnualRatePct);
+
+  const points: FireCurvePoint[] = [];
+  for (let year = 0; year <= totalYears; year++) {
+    const months = year * 12;
+    const totalInvested = fromCents(
+      Math.min(MAX_SAFE_MONEY * 100, pvCents + pmtCents * months)
+    );
+
+    if (year === 0 || monthlyRate <= 0) {
+      points.push({
+        year,
+        totalInvested,
+        totalCompound: totalInvested,
+      });
+      continue;
+    }
+
+    const factor = Math.pow(1 + monthlyRate, months);
+    const rawCompound = pv * factor + pmt * ((factor - 1) / monthlyRate);
+    const clampedCompound = Number.isFinite(rawCompound)
+      ? Math.min(MAX_SAFE_MONEY, Math.max(totalInvested, rawCompound))
+      : MAX_SAFE_MONEY;
+
+    points.push({
+      year,
+      totalInvested,
+      totalCompound: Math.round(clampedCompound * 100) / 100,
+    });
+  }
+
+  return points;
+}
+
+export type ExpenseDueStatus = 'paga' | 'vencida' | 'vence_breve' | 'no_prazo';
+
+/**
+ * Classifica o status de vencimento de uma despesa na competência informada
+ * comparando dias civis sem interferência de fuso horário / horário de verão.
+ */
+export function classifyExpenseDueStatus(
+  expense: Pick<ExpenseItem, 'paga' | 'diaVencimento'>,
+  competencia: string,
+  today: Date = new Date()
+): ExpenseDueStatus {
+  if (expense.paga) return 'paga';
+
+  const refDate =
+    today instanceof Date && Number.isFinite(today.getTime()) ? today : new Date();
+  const compMatch = /^(\d{4})-(\d{2})$/.exec(String(competencia || '').trim());
+  const year = compMatch ? parseInt(compMatch[1], 10) : refDate.getFullYear();
+  const parsedMonth = compMatch ? parseInt(compMatch[2], 10) : refDate.getMonth() + 1;
+  const monthZeroBased =
+    parsedMonth >= 1 && parsedMonth <= 12 ? parsedMonth - 1 : refDate.getMonth();
+
+  const dueDate = clampDateToMonth(year, monthZeroBased, expense.diaVencimento);
+  const daysUntilDue = diffDaysUTC(refDate, dueDate);
+
+  if (daysUntilDue < 0) return 'vencida';
+  if (daysUntilDue <= 3) return 'vence_breve';
+  return 'no_prazo';
+}
